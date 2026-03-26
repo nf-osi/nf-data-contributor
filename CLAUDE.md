@@ -101,61 +101,197 @@ Status values: `discovered`, `rejected_relevance`, `rejected_duplicate`, `synaps
 
 ## NF/SWN Search Terms
 
-Use these terms to query scientific repositories (OR logic):
-
+### PubMed query (primary — use MeSH terms where possible)
 ```
-neurofibromatosis, neurofibromatosis type 1, neurofibromatosis type 2,
-NF1, NF2, schwannomatosis, SMARCB1 loss, LZTR1,
-plexiform neurofibroma, cutaneous neurofibroma, vestibular schwannoma,
-acoustic neuroma, malignant peripheral nerve sheath tumor, MPNST,
-spinal ependymoma, meningioma NF2, spinal schwannoma,
-SMARCB1, neurofibromin, merlin NF
+("Neurofibromatoses"[MeSH] OR "Neurofibromatosis 1"[MeSH] OR "Neurofibromatosis 2"[MeSH]
+ OR "Neurofibrosarcoma"[MeSH] OR neurofibromatosis[tiab] OR "NF1"[tiab] OR "NF2"[tiab]
+ OR schwannomatosis[tiab] OR "MPNST"[tiab] OR "malignant peripheral nerve sheath"[tiab]
+ OR "plexiform neurofibroma"[tiab] OR "vestibular schwannoma"[tiab]
+ OR "acoustic neuroma"[tiab] OR SMARCB1[tiab] OR LZTR1[tiab] OR neurofibromin[tiab])
+```
+
+### Repository keyword search (secondary — for repositories without PMID links)
+```
+neurofibromatosis, NF1, NF2, schwannomatosis, MPNST,
+plexiform neurofibroma, vestibular schwannoma, SMARCB1, LZTR1, neurofibromin
 ```
 
 ---
 
-## Repositories to Query
+## Discovery Architecture — Publication-First
 
-| Repository | API | Primary data types |
-|-----------|-----|--------------------|
-| NCBI GEO | NCBI Entrez E-utilities (Biopython) | RNA-seq, microarray, ChIP-seq, scRNA-seq |
-| NCBI SRA | NCBI Entrez E-utilities | Raw sequencing (FASTQ, BAM) |
-| Zenodo | REST API v3: `https://zenodo.org/api/records` | All types |
-| Figshare | REST API v2: `https://api.figshare.com/v2` | All types |
-| OSF | REST API v2: `https://api.osf.io/v2` | All types |
-| ArrayExpress/BioStudies | `https://www.ebi.ac.uk/biostudies/api/v1/search` | Microarray, RNA-seq |
-| EGA | `https://ega-archive.org/metadata/v2/studies` | Genomics (controlled) |
-| PRIDE | `https://www.ebi.ac.uk/pride/ws/archive/v2/projects` | Proteomics |
-| MetaboLights | `https://www.ebi.ac.uk/metabolights/ws` | Metabolomics |
-| NCI PDC | GraphQL: `https://pdc.cancer.gov/graphql` | Clinical proteomics |
+**Start with papers, not repositories.** Query PubMed for NF/SWN publications, then resolve what data each paper deposited across all repositories. Repository-direct queries are a secondary pass only for data that isn't yet linked to a paper.
 
----
+```
+PRIMARY PATH — publication-first
+─────────────────────────────────────────────────────────
+PubMed (NF/SWN MeSH + keyword search, date-filtered)
+  │
+  ├─ NCBI elink (pubmed → gds)     → GEO dataset IDs
+  ├─ NCBI elink (pubmed → sra)     → SRA study IDs
+  ├─ NCBI elink (pubmed → gap)     → dbGaP study IDs
+  └─ Europe PMC annotations API    → ALL accession numbers
+                                     mentioned in full text
+                                     (GEO, SRA, EGA, PRIDE,
+                                      ArrayExpress, Zenodo, etc.)
 
-## Publication-Level Grouping
+For each accession found → fetch metadata from source repository
 
-**Projects are created at the publication/study level, not the repository accession level.**
+SECONDARY PATH — repository-direct (catches unpublished / preprint data)
+─────────────────────────────────────────────────────────
+Zenodo, Figshare, OSF, ArrayExpress, PRIDE, MetaboLights, NCI PDC
+  → query with NF keywords
+  → SKIP any result that has a PMID already found in the primary path
+  → keeps only datasets not yet linked to a paper
+```
 
-A single paper may deposit data in multiple repositories (e.g., raw reads in SRA, processed expression in GEO, proteomics in PRIDE). All datasets from the same publication belong in one Synapse project. Use the following signals to group candidates together:
+### Why publication-first is more comprehensive
+- PubMed MeSH indexing is authoritative — catches papers that use non-standard NF terminology
+- NCBI maintains formal bidirectional links between PMIDs and GEO/SRA/dbGaP
+- Europe PMC text-mines open-access full text — finds accessions mentioned in methods/data availability but not formally linked in NCBI
+- You get the paper abstract immediately, which is the richest input for relevance scoring
+- Publication groups form naturally at discovery time — no post-hoc fuzzy title matching needed
 
-1. **Shared PMID** — strongest signal. Any two candidates with the same PMID are from the same publication.
-2. **Shared DOI** — strong signal for preprints and multi-accession deposits.
-3. **Fuzzy title match across candidates** — if two candidates from different repositories have very similar titles (cosine similarity ≥ 0.85), treat them as the same publication.
-4. **Cross-reference lookup** — for GEO accessions, fetch the linked PMID via Entrez. For SRA, fetch the parent BioProject and check its linked publications. For Zenodo/Figshare, the DOI record often references the paper DOI.
+### Primary path — key API patterns
 
-### Publication group schema (internal, saved to `/tmp/nf_agent/publication_groups.json`):
+**Step 1: PubMed search**
+```python
+from Bio import Entrez
+import os
+
+Entrez.email = "nf-data-contributor@sagebionetworks.org"
+if os.environ.get('NCBI_API_KEY'):
+    Entrez.api_key = os.environ['NCBI_API_KEY']
+
+query = ('("Neurofibromatoses"[MeSH] OR neurofibromatosis[tiab] OR "NF1"[tiab] '
+         'OR "NF2"[tiab] OR schwannomatosis[tiab] OR "MPNST"[tiab] '
+         'OR "plexiform neurofibroma"[tiab] OR "vestibular schwannoma"[tiab] '
+         'OR SMARCB1[tiab] OR LZTR1[tiab]) '
+         f'AND ("{since_date}"[PDAT] : "3000"[PDAT])')
+
+handle = Entrez.esearch(db='pubmed', term=query, retmax=200, usehistory='y')
+search_results = Entrez.read(handle)
+pmids = search_results['IdList']
+```
+
+**Step 2: Fetch full PubMed records (title, abstract, authors, DOI)**
+```python
+# Batch fetch in chunks of 100
+handle = Entrez.efetch(db='pubmed', id=','.join(pmids), rettype='xml', retmode='xml')
+records = Entrez.read(handle)
+# Each record: MedlineCitation > Article > ArticleTitle, Abstract, AuthorList
+# PubmedData > ArticleIdList for DOI
+```
+
+**Step 3: NCBI elink — find linked datasets for all PMIDs at once**
+```python
+# GEO datasets
+handle = Entrez.elink(dbfrom='pubmed', db='gds', id=','.join(pmids))
+link_results = Entrez.read(handle)
+# link_results[i]['LinkSetDb'][0]['Link'] → list of GEO IDs linked to pmids[i]
+
+# SRA studies
+handle = Entrez.elink(dbfrom='pubmed', db='sra', id=','.join(pmids))
+
+# dbGaP
+handle = Entrez.elink(dbfrom='pubmed', db='gap', id=','.join(pmids))
+```
+
+**Step 4: Europe PMC annotations — find ALL repository accessions in full text**
+```python
+import httpx, time
+
+def get_europepmc_accessions(pmid: str) -> list[dict]:
+    """Returns all database accessions mentioned in this paper's full text."""
+    resp = httpx.get(
+        'https://www.ebi.ac.uk/europepmc/annotations_api/annotationsByArticleIds',
+        params={
+            'articleIds': f'MED:{pmid}',
+            'type': 'Accession Numbers',
+            'format': 'JSON'
+        },
+        timeout=15
+    )
+    if resp.status_code != 200:
+        return []
+    data = resp.json()
+    accessions = []
+    for article in data:
+        for ann in article.get('annotations', []):
+            # ann has: 'exact' (accession), 'provider' (GEO, SRA, EGA, etc.)
+            accessions.append({
+                'accession_id': ann.get('exact'),
+                'source': ann.get('provider'),
+                'tags': ann.get('tags', [])
+            })
+    return accessions
+```
+
+Europe PMC provider values map to repositories:
+- `GEO` → GEO accession (GSExxxxxx)
+- `ENA` / `SRA` → SRA/ENA accession (SRPxxxxxx, ERPxxxxxx)
+- `EGA` → EGA accession (EGADxxxxxx)
+- `ArrayExpress` → ArrayExpress (E-MTAB-xxxxx)
+- `PRIDE` → PRIDE (PXDxxxxxx)
+- `BioStudies` → BioStudies (S-BIADxxxxx)
+- `Zenodo` → Zenodo DOI
+- `Figshare` → Figshare DOI
+- `metabolights` → MetaboLights (MTBLSxxxxx)
+
+**Step 5: Fetch repository metadata for each found accession**
+
+For each unique accession gathered across elink + Europe PMC, fetch its metadata from the source repository to get: data types, file formats, sample count, access type, data URL. Use the same repository APIs documented in the direct-URL section below.
+
+### Secondary path — repository-direct
+
+Query these repositories with NF keywords but **only retain results with no associated PMID** (check the repository record for a linked publication):
+
+| Repository | API | Filter |
+|-----------|-----|--------|
+| Zenodo | `https://zenodo.org/api/records` | Skip if DOI resolves to a known PMID |
+| Figshare | `https://api.figshare.com/v2` | Skip if has linked publication DOI already in primary set |
+| OSF | `https://api.osf.io/v2` | Skip if has linked preprint/paper already in primary set |
+| ArrayExpress/BioStudies | `https://www.ebi.ac.uk/biostudies/api/v1/search` | Skip if PMID found |
+| PRIDE | `https://www.ebi.ac.uk/pride/ws/archive/v2/projects` | Skip if has linked publication |
+| MetaboLights | `https://www.ebi.ac.uk/metabolights/ws` | Skip if has linked publication |
+| NCI PDC | `https://pdc.cancer.gov/graphql` | Skip if has linked PMID |
+
+### Publication group schema
+
+Publication groups now form **at discovery time** from the primary path. No post-hoc fuzzy title matching is needed because PMID is the natural key.
+
 ```json
 {
-  "pub_group_id": "pmid_12345678",
-  "publication_title": "Gene expression profiling of NF1 MPNSTs",
-  "pmid": "12345678",
-  "doi": "10.1234/example",
+  "pub_group_id": "pmid_41760889",
+  "publication_title": "Pembrolizumab in advanced MPNSTs — a phase 2 trial",
+  "pmid": "41760889",
+  "doi": "10.1038/s41591-2025-xxxxx",
+  "abstract": "...",
+  "authors": ["Smith J", "Doe A"],
+  "pub_date": "2025-12-15",
   "datasets": [
-    {"accession_id": "GSE301187", "source_repository": "GEO", "data_url": "..."},
-    {"accession_id": "SRP123456", "source_repository": "SRA", "data_url": "..."}
-  ],
-  "relevance_result": { ... }
+    {
+      "accession_id": "GSE301187",
+      "source_repository": "GEO",
+      "discovery_path": "ncbi_elink",
+      "data_url": "https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE301187",
+      "data_types": ["rnaSeq"],
+      "file_formats": ["TXT.GZ"],
+      "sample_count": 13,
+      "access_type": "open"
+    },
+    {
+      "accession_id": "SRP123456",
+      "source_repository": "SRA",
+      "discovery_path": "europepmc_annotations",
+      "data_url": "https://www.ncbi.nlm.nih.gov/sra/SRP123456",
+      "access_type": "open"
+    }
+  ]
 }
 ```
+
+For secondary-path datasets (no PMID), use the same schema with `"pmid": null` and `"publication_title"` derived from the repository record title.
 
 For candidates with no PMID/DOI and no title match to others, each becomes its own single-dataset publication group.
 

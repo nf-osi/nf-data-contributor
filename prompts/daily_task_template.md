@@ -1,19 +1,18 @@
 # NF Data Contributor Agent — Daily Run
 
 **Today's date:** {{TODAY}}
-**Search for datasets published since:** {{LOOKBACK_DATE}}
+**Search for publications/datasets since:** {{LOOKBACK_DATE}}
 
 ---
 
 ## Your Task
 
-Run the full NF dataset discovery pipeline. Write Python scripts to `/tmp/nf_agent/` and execute them. Refer to CLAUDE.md for all reference information (APIs, auth, annotation schemas, safety rules, dedup logic).
+Run the full NF dataset discovery pipeline using a **publication-first** approach: find papers first via PubMed, then resolve their data deposits. Write Python scripts to `/tmp/nf_agent/` and execute them. Refer to CLAUDE.md for all API patterns, auth, annotation schemas, and safety rules.
 
 ---
 
 ## Step 1 — Setup
 
-Install dependencies and authenticate:
 ```
 mkdir -p /tmp/nf_agent
 pip install synapseclient httpx biopython pyyaml scikit-learn anthropic --quiet
@@ -21,47 +20,78 @@ pip install synapseclient httpx biopython pyyaml scikit-learn anthropic --quiet
 
 Write and run `/tmp/nf_agent/setup.py`:
 1. Authenticate with Synapse via `lib/synapse_login.py` — print the logged-in username
-2. Call `lib/state_bootstrap.py` to get or create state table IDs (if `STATE_PROJECT_ID` env var is empty, create a Synapse project named "NF DataContributor Agent State" and use that)
-3. Load all previously processed accession IDs from `NF_DataContributor_ProcessedStudies` into a set
-4. Save table IDs, the accession set, and the state project ID to `/tmp/nf_agent/state.json`
+2. Get or create state tables via `lib/state_bootstrap.py`. If `STATE_PROJECT_ID` is empty, create a Synapse project named "NF DataContributor Agent State" and use it.
+3. Load all previously processed accession IDs into a Python set
+4. Save table IDs, accession set, and state project ID to `/tmp/nf_agent/state.json`
 5. Print: "Setup complete. Previously processed: N accessions"
 
 ---
 
-## Step 2 — Discover Candidates
+## Step 2 — PRIMARY DISCOVERY: PubMed + elink + Europe PMC
 
-Write and run one script per repository. For each, search for NF/SWN terms published since {{LOOKBACK_DATE}}, fetch up to 10 results, and save to `/tmp/nf_agent/{repo}_candidates.json` using the standard candidate schema from CLAUDE.md.
+Write and run `/tmp/nf_agent/discover_primary.py`.
 
-Run repositories in order (log errors and continue on failure):
-1. GEO — NCBI Entrez, use `NCBI_API_KEY` env var if set
-2. SRA — NCBI Entrez
-3. Zenodo
-4. Figshare
-5. OSF
-6. ArrayExpress / BioStudies
-7. EGA
-8. PRIDE
-9. MetaboLights
-10. NCI PDC (GraphQL)
+This is the main discovery path. The goal is: find all NF/SWN publications from the lookback window, then systematically resolve every data deposit associated with each paper.
 
-For each repository, print: `{repo}: found N candidates`
+### 2a — Search PubMed
+
+Use the MeSH-based query from CLAUDE.md with date filter `{{LOOKBACK_DATE}}` to `{{TODAY}}`. Fetch up to 200 PMIDs. For each PMID, fetch the full record (title, abstract, authors, DOI, pub date).
+
+Print: `PubMed: found N publications`
+
+### 2b — NCBI elink: resolve linked datasets
+
+For each batch of PMIDs (up to 100 at a time to respect API limits):
+- `elink(dbfrom='pubmed', db='gds', ...)` → GEO dataset IDs → fetch GEO metadata via `esummary`
+- `elink(dbfrom='pubmed', db='sra', ...)` → SRA study IDs → fetch SRA runinfo metadata
+- `elink(dbfrom='pubmed', db='gap', ...)` → dbGaP study IDs → note as controlled access
+
+For each linked accession, record: accession_id, source_repository, data_url, data_types, file_formats, sample_count, access_type, discovery_path="ncbi_elink".
+
+### 2c — Europe PMC annotations: find accessions mentioned in full text
+
+For each PMID, call the Europe PMC annotations API (see CLAUDE.md for the exact pattern). This finds GEO, SRA, EGA, PRIDE, ArrayExpress, Zenodo, MetaboLights, and other accessions mentioned anywhere in the paper — even in supplementary notes or data availability statements.
+
+For each returned accession not already found via elink:
+- Identify the repository from the `provider` field
+- Fetch basic metadata from that repository's API
+- Add to the paper's dataset list with `discovery_path="europepmc_annotations"`
+
+Be resilient: Europe PMC returns 404 or empty for papers not in open-access PMC — that's normal, just skip and continue.
+
+### 2d — Assemble publication groups
+
+Combine elink + Europe PMC results into `publication_groups.json`. Each group has one PMID as its key and all datasets found for that paper. See CLAUDE.md for the full schema.
+
+Print a summary:
+```
+Primary discovery complete:
+  Publications scanned: N
+  Publications with linked data: M
+  Total dataset accessions found: K
+  Breakdown: GEO: N, SRA: N, dbGaP: N, EGA: N, PRIDE: N, other: N
+```
 
 ---
 
-## Step 3 — Enrich with Publication Metadata and Group by Publication
+## Step 3 — SECONDARY DISCOVERY: Repository-direct (unpublished/preprint data)
 
-Write and run `/tmp/nf_agent/group_by_publication.py`:
+Write and run `/tmp/nf_agent/discover_secondary.py`.
 
-1. Load all `*_candidates.json` files, combine into a flat list, deduplicate by accession_id
-2. **Enrich with publication metadata**: For candidates with a PMID, fetch the full PubMed record via Entrez to get the paper title and abstract (often richer than the repository description). For GEO accessions without a PMID, check the GEO record for linked publications.
-3. **Group by publication** using the logic in CLAUDE.md:
-   - Primary key: shared PMID
-   - Secondary key: shared DOI
-   - Tertiary: fuzzy title similarity ≥ 0.85 across candidates
-   - Each candidate with no match becomes its own group
-4. Save publication groups to `/tmp/nf_agent/publication_groups.json`
-5. Print: "N candidates → M publication groups"
-   - Show each group: `[PMID:12345] "Paper Title" — 2 datasets: GEO:GSE123, SRA:SRP456`
+Query these repositories with NF keywords for datasets published since `{{LOOKBACK_DATE}}`. For each result, check if it has a PMID or DOI that was already found in the primary path — if so, skip it (it's already covered). Only keep datasets with no associated publication yet.
+
+Repositories to query:
+- Zenodo (`https://zenodo.org/api/records`) — search `resource_type.type:dataset`
+- Figshare (`https://api.figshare.com/v2/articles/search`) — `item_type=3`
+- OSF (`https://api.osf.io/v2/nodes/`) — public projects
+- ArrayExpress/BioStudies (`https://www.ebi.ac.uk/biostudies/api/v1/search`)
+- PRIDE (`https://www.ebi.ac.uk/pride/ws/archive/v2/projects`)
+- MetaboLights (`https://www.ebi.ac.uk/metabolights/ws`)
+- NCI PDC (GraphQL — filter for NF disease types)
+
+For unpublished results, create publication groups with `pmid: null`, using the repository title as the publication title.
+
+Print: `Secondary discovery: N additional datasets (no associated publication)`
 
 ---
 
@@ -69,26 +99,20 @@ Write and run `/tmp/nf_agent/group_by_publication.py`:
 
 Write and run `/tmp/nf_agent/dedup.py`:
 
-1. Load `publication_groups.json` and `state.json`
-2. **Inspect the portal schema first**: query `SELECT * FROM syn52694652 LIMIT 1` and `SELECT * FROM syn16858331 LIMIT 1` to see the actual column names before writing any matching queries
-3. Classify each publication group as NEW, ADD, or SKIP using the three-outcome logic in CLAUDE.md:
-   - Check by PMID (exact match against portal)
-   - Check by DOI (case-insensitive)
-   - Check by accession ID in portal files table
-   - Check by fuzzy title (TF-IDF cosine similarity)
-   - If similarity 0.70–0.84: classify as NEW but log a "near-match warning" with the portal study name
-4. Save results to `/tmp/nf_agent/dedup_results.json`:
-   ```json
-   {
-     "new": [ {publication_group} ],
-     "add": [ {"group": {publication_group}, "existing_project_id": "syn...", "new_datasets": [...]} ],
-     "skip": [ {"group": {publication_group}, "reason": "..."} ],
-     "near_matches": [ {"group": {publication_group}, "portal_study": "...", "similarity": 0.77} ]
-   }
+1. Load all publication groups from Steps 2 and 3
+2. Remove any group whose accession_ids are all already in the processed accessions set from state.json
+3. Inspect portal schema: `SELECT * FROM syn52694652 LIMIT 5` and `SELECT * FROM syn16858331 LIMIT 5` — print actual column names before writing any queries
+4. Classify each remaining group as NEW, ADD, or SKIP using the three-outcome logic in CLAUDE.md:
+   - **PMID match** (exact) → strongest signal for ADD or SKIP
+   - **DOI match** (case-insensitive)
+   - **Accession match** in portal files table
+   - **Fuzzy title** (TF-IDF cosine ≥ 0.85 = match; 0.70–0.84 = near-match warning, treat as NEW)
+5. Save to `/tmp/nf_agent/dedup_results.json`
+6. Print:
    ```
-5. Print summary:
-   ```
-   Dedup results: N new, M add-to-existing, K skip, J near-matches flagged
+   Dedup: N new | M add-to-existing | K skip | J near-match warnings
+   Near-matches:
+     "Paper title A" (0.76 similar to portal study "Existing Study X")
    ```
 
 ---
@@ -97,15 +121,16 @@ Write and run `/tmp/nf_agent/dedup.py`:
 
 Write and run `/tmp/nf_agent/score.py`:
 
-1. Load `dedup_results.json` — score all groups in `new` and `add` lists
-2. For each publication group, call `claude-sonnet-4-6` using the publication-level scoring prompt in CLAUDE.md (use the PubMed abstract if available, fall back to the richest repository abstract)
-3. Apply filters: relevance ≥ 0.70, is_primary_data = true, sample_count ≥ 3 (if known)
-4. Save to `/tmp/nf_agent/scored.json` with relevance results attached to each group
-5. Print each result:
+1. Score all groups in the `new` and `add` lists from dedup_results.json
+2. For groups with a PMID, use the PubMed abstract (already fetched in Step 2) — this is the richest scoring input
+3. Call `claude-sonnet-4-6` with the publication-level scoring prompt from CLAUDE.md
+4. Apply filters: score ≥ 0.70, is_primary_data = true, sample_count ≥ 3 (if known)
+5. Save approved + rejected groups to `/tmp/nf_agent/scored.json`
+6. Print each result:
    ```
-   [NEW] [APPROVED] "Gene Expression Profiling of NF1 MPNSTs" — score: 0.95 — GEO:GSE301187
-   [ADD] [APPROVED] "NF2 Schwann Cell Proteomics" — score: 0.88 — adding PRIDE:PXD012345 to syn12345
-   [NEW] [REJECTED] "KRAS plasma samples" — score: 0.05 — low relevance
+   [NEW][APPROVED]  "Pembrolizumab in MPNSTs" (PMID:41760889) — 0.95 — 2 datasets: GEO:GSE301187, SRA:SRP123
+   [ADD][APPROVED]  "NF2 Schwann cell proteomics" (PMID:41234567) — 0.88 — adding PRIDE:PXD012345 to syn12345
+   [NEW][REJECTED]  "KRAS plasma biomarkers" (no PMID) — 0.05 — low relevance
    ```
 
 ---
@@ -114,72 +139,60 @@ Write and run `/tmp/nf_agent/score.py`:
 
 Write and run `/tmp/nf_agent/synapse_actions.py`:
 
-For each approved publication group (stopping at 50 total write operations):
+For each approved group (max 50 write operations total):
 
 **For NEW groups:**
-1. Create a Synapse project named after the publication title (`suggested_project_name` from Claude)
-2. Create the standard folder hierarchy: `Raw Data/`, `Analysis/`, `Source Metadata/`
-3. For each dataset in the group, create a `{Repository}_{AccessionID}/` subfolder inside `Raw Data/` with an ExternalLink pointer and dataset-level annotations
-4. Apply project-level annotations (study, resourceType, resourceStatus, pmid, doi)
-5. Create provenance on each ExternalLink
-6. Create the wiki page using the template in CLAUDE.md
-7. Print: `Created: "{project_name}" ({project_id}) — {N} datasets`
+1. Create Synapse project named `suggested_project_name` from Claude scoring
+2. Folder hierarchy: `Raw Data/`, `Analysis/`, `Source Metadata/`
+3. For each dataset in the group:
+   a. Create `{Repository}_{AccessionID}/` subfolder in `Raw Data/`
+   b. Enumerate individual file download URLs from the source repository (see CLAUDE.md "How to Get Direct Download URLs Per Repository")
+   c. If ≤ 100 files and direct URLs available: create one `File` entity per file with `externalURL=<direct_download_url>`, `synapseStore=False`
+   d. If > 100 files or controlled access: create one `ExternalLink` to the landing page
+   e. Apply dataset-folder-level annotations (contentType=dataset, externalAccessionID, assay, species, etc.)
+   f. Set provenance on each File/Link entity
+4. Apply project-level annotations (study, resourceType, resourceStatus=pendingReview, pmid, doi)
+5. Create wiki page using CLAUDE.md template — include the full datasets table
 
 **For ADD groups:**
-- If the existing project is an agent-created project (found in agent state table): find its `Raw Data/` folder and add the new dataset subfolder(s) following the same pattern
-- If the existing project is a portal-managed project (found only in portal table, no agent state entry): **do not write to it** — create a JIRA ticket flagged "[Manual]" and log as `dataset_added` with a note
-- Print: `Added: {Repository}:{AccessionID} → existing project {project_id}`
+- Agent-created project: add new dataset subfolder to its `Raw Data/` folder
+- Portal-managed project: create [Manual] JIRA ticket, skip write
 
-Save results to `/tmp/nf_agent/created_projects.json`:
-```json
-[
-  {"action": "created", "project_id": "syn...", "project_name": "...", "accession_ids": [...]},
-  {"action": "added",   "project_id": "syn...", "project_name": "...", "accession_ids": [...]}
-]
-```
+Save `/tmp/nf_agent/created_projects.json`.
+Print each action: `Created: "Project Name" (synXXX) — N datasets, M files`
 
 ---
 
-## Step 7 — Send JIRA Notifications
+## Step 7 — JIRA Notifications
 
-Write and run `/tmp/nf_agent/notify.py`:
-
-For each created or updated project:
-- NEW project: `"Review auto-discovered study: {project_name}"`
-- Dataset added to agent project: `"New dataset linked to existing study: {project_name} — {repo}:{accession}"`
-- Dataset requiring manual link to portal project: `"[Manual] Link external dataset to portal study: {project_name} — {repo}:{accession}"`
-
-If JIRA credentials are missing/invalid, log a warning and skip.
-Save ticket results to `/tmp/nf_agent/jira_tickets.json`.
+Write and run `/tmp/nf_agent/notify.py`. Attempt ticket creation; log 401/placeholder errors as warnings and continue.
 
 ---
 
 ## Step 8 — Update State Tables
 
-Write and run `/tmp/nf_agent/update_state.py`:
+Write and run `/tmp/nf_agent/update_state.py`. Record every accession evaluated. Append run summary row. Print:
 
-1. For every accession evaluated, append a row to `NF_DataContributor_ProcessedStudies`
-2. Append one run summary row to `NF_DataContributor_RunLog`
-3. Print the final run summary:
-   ```
-   === NF Data Contributor Agent — Run Complete ===
-   Date: {{TODAY}}
-   Candidates found: N
-   Publication groups: N
-   Dedup — new: N | add: N | skip: N | near-matches flagged: N
-   After relevance scoring: N approved
-   Synapse projects created: N
-   Datasets added to existing projects: N
-   JIRA tickets created: N
-   Errors: N
-   ================================================
-   ```
+```
+=== NF Data Contributor Agent — Run Complete ===
+Date: {{TODAY}}
+Publications scanned (PubMed): N
+Publications with data: N
+Secondary datasets (no paper): N
+Publication groups total: N
+Dedup — new: N | add: N | skip: N | near-matches: N
+After scoring: N approved
+Synapse projects created: N
+Datasets added to existing: N
+Errors: N
+================================================
+```
 
 ---
 
 ## Error Handling
 
-- If any step script exits non-zero, log the error and continue to the next step where possible
-- Always run Step 8 to record what did complete, even after failures
-- If Synapse project creation fails for a specific group, log it as `status=error` and continue
-- If the Claude API fails after 3 retries with exponential backoff, log as `status=error` and continue
+- On any step failure, log the error, continue to the next step where safe
+- Always run Step 8 regardless of earlier failures
+- If Europe PMC returns nothing for a PMID (paper not in open-access PMC), continue — that's expected
+- If NCBI rate-limits you, wait 1 second between elink batches (use `time.sleep(1)`)
