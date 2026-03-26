@@ -906,32 +906,48 @@ For GEO+SRA specifically: the combined GEO supplementary + SRA FASTQ count can b
 
 ### Required Annotations
 
+**Critical rule: only apply annotation values that are valid per the registered schema.**
+Do not hardcode annotation values. Fetch the schema's enum fields at runtime (Step B of the annotation workflow below) and only set values that appear in those enum lists. Applying a field with an invalid value is worse than omitting it — it will appear as a schema validation error.
+
 **Project-level** (apply to the Synapse project):
 | Key | Value |
 |-----|-------|
 | study | {suggested_project_name} |
-| resourceType | experimentalData |
-| resourceStatus | pendingReview |
-| fundingAgency | Not Applicable (External Study) |
+| resourceType | `experimentalData` (valid schema enum) |
+| resourceStatus | `pendingReview` |
+| fundingAgency | `Not Applicable (External Study)` |
 | pmid | {pmid if available} |
 | doi | {doi if available} |
 
-**File level** (apply to **each individual File entity** inside the dataset folder — this is what appears in the NF Portal files table):
-| Key | Value |
+**File level** (apply to **each individual File entity** — this is what appears in the NF Portal files table):
+
+The exact set of applicable fields depends on which NF schema template is bound (scrnaSeq, rnaSeq, WGS, etc.). Each template validates a different field set. Always fetch the schema's enum fields first, then annotate only what you can validate.
+
+Common fields across most templates (always check the specific template's enum fields):
+| Key | Notes |
 |-----|-------|
 | study | {suggested_project_name} |
 | externalAccessionID | {accession_id} |
 | externalRepository | {source_repository} |
-| accessType | open \| controlled |
-| assay | {normalized to NF schema enum} |
-| species | {normalized to NF schema enum} |
-| tumorType | {normalized to NF schema enum} |
-| diagnosis | {normalized to NF schema enum} |
-| dataType | Genomic \| Proteomic \| Metabolomic \| Other |
-| dataSubtype | raw |
-| fileFormat | {inferred from file extension, normalized to NF schema enum} |
-| resourceStatus | pendingReview |
-| + any additional fields extracted from source material | |
+| resourceStatus | `pendingReview` |
+| assay | must match schema enum exactly |
+| species | must match schema enum exactly |
+| tumorType | must match schema enum exactly |
+| diagnosis | must match schema enum exactly |
+| dataSubtype | `raw` / `processed` / `normalized` etc. — check schema enum |
+| fileFormat | inferred from file extension, must match schema enum |
+| platform | must match schema enum |
+| libraryPreparationMethod | must match schema enum |
+| libraryStrand | must match schema enum |
+| specimenPreparationMethod | must match schema enum |
+| resourceType | `experimentalData` for data files |
+| specimenID | one per file, parsed from filename or sample metadata |
+| individualID | one per file, parsed from filename or sample metadata |
+
+Additional fields present in many templates (extract from source material when available):
+`sex`, `organ`, `specimenType`, `nucleicAcidSource`, `runType`, `nf1Genotype`, `nf2Genotype`, `modelSpecies`, `modelSex`, `dissociationMethod`
+
+**Do NOT apply** fields not present in the template's enum list (e.g. `dataType` is not in scrnaseqtemplate; `accessType` and `contentType` are portal-level annotations not schema-validated). Setting non-schema fields is fine for portal search, but setting schema fields with invalid values will fail validation.
 
 **Dataset folder level** (apply to the `{Repo}_{AccessionID}/` folder — used for schema binding and Curator Grid):
 | Key | Value |
