@@ -554,7 +554,48 @@ ann['annotations'] = {
 syn.restPUT(f'/entity/{dataset_id}/annotations2', json.dumps(ann))
 ```
 
-#### Step 4 — Bind NF schema to the Dataset entity and validate
+#### Step 4 — Define columns on the Dataset entity
+
+Synapse Dataset entities require explicit column definitions to display annotation data in the table view. Without columns, the Dataset appears empty in the UI even if its file items have full annotations.
+
+Create a Column object for **each annotation field** applied to the files, then update the Dataset entity with those column IDs:
+
+```python
+# Define columns matching the annotation fields on the files
+ANNOTATION_COLUMNS = [
+    ('study',                    'STRING', 256),
+    ('assay',                    'STRING', 128),
+    ('species',                  'STRING', 128),
+    ('diagnosis',                'STRING', 256),
+    ('tumorType',                'STRING', 256),
+    ('platform',                 'STRING', 256),
+    ('libraryPreparationMethod', 'STRING', 128),
+    ('libraryStrand',            'STRING', 64),
+    ('dataSubtype',              'STRING', 64),
+    ('fileFormat',               'STRING', 64),
+    ('resourceType',             'STRING', 64),
+    ('resourceStatus',           'STRING', 64),
+    ('externalAccessionID',      'STRING', 128),
+    ('externalRepository',       'STRING', 64),
+    ('specimenID',               'STRING', 128),
+    ('individualID',             'STRING', 128),
+]
+# Add any additional per-dataset annotation fields here (organ, sex, nucleicAcidSource, etc.)
+
+col_ids = []
+for col_name, col_type, col_size in ANNOTATION_COLUMNS:
+    col = syn.restPOST('/column', json.dumps({
+        'name': col_name, 'columnType': col_type, 'maximumSize': col_size
+    }))
+    col_ids.append(col['id'])
+
+# Update Dataset entity with column IDs
+ds_body = syn.restGET(f'/entity/{dataset_id}')
+ds_body['columnIds'] = col_ids
+syn.restPUT(f'/entity/{dataset_id}', json.dumps(ds_body))
+```
+
+#### Step 5 — Bind NF schema to the Dataset entity and validate
 
 ```python
 import time
@@ -608,8 +649,10 @@ for sra_id in sra_ids[:50]:  # cap at 50 runs
     for row in ena_resp.json():
         for ftp_path in row.get('fastq_ftp', '').split(';'):
             if ftp_path:
-                https_url = 'https://' + ftp_path.replace('ftp.sra.ebi.ac.uk/', 'ftp.sra.ebi.ac.uk/')
+                https_url = 'https://' + ftp_path
                 # Create File entity with this URL inside the GEO Dataset
+                # If ENA returns empty (run not yet mirrored), use get_sra_run_fastq_urls(srr)
+                # which falls back to NCBI SDL API for S3 presigned URLs
 ```
 
 Put both GEO supplementary files AND SRA FASTQ files inside the **same** `GEO_{AccessionID}` Dataset entity — they are all part of the same deposit.
@@ -717,42 +760,123 @@ def get_file_list_geo(gds_numeric_id: str, geo_accession: str) -> list[tuple[str
             srr = row.get('Run', '')
             if not srr:
                 continue
-            ena_resp = httpx.get(
-                'https://www.ebi.ac.uk/ena/portal/api/filereport',
-                params={'accession': srr, 'result': 'read_run',
-                        'fields': 'run_accession,fastq_ftp', 'format': 'json'},
-                timeout=15
-            )
-            if ena_resp.status_code != 200:
-                continue
-            for record in ena_resp.json():
-                for ftp_path in record.get('fastq_ftp', '').split(';'):
-                    if ftp_path:
-                        fname = ftp_path.split('/')[-1]
-                        https_url = 'https://' + ftp_path
-                        files.append((fname, https_url))
+            run_files = get_sra_run_fastq_urls(srr)
+            files.extend(run_files)
 
     return files
+
+
+def get_sra_run_fastq_urls(srr: str) -> list[tuple[str, str]]:
+    """
+    Get direct FASTQ (or CRAM/BAM) URLs for a single SRR accession.
+    Only returns open, human-readable raw formats — never .sra format files.
+    Tries ENA filereport first (preferred — stable FTP URLs).
+    Falls back to NCBI SDL API requesting only fastq/cram/bam.
+    Returns [] if only .sra format is available (caller should fall back to BioProject link).
+    """
+    RAW_FORMATS = ('.fastq', '.fastq.gz', '.fq', '.fq.gz', '.cram', '.bam')
+
+    # 1. Try ENA filereport — stable https:// FTP URLs, always FASTQ
+    try:
+        ena_resp = httpx.get(
+            'https://www.ebi.ac.uk/ena/portal/api/filereport',
+            params={'accession': srr, 'result': 'read_run',
+                    'fields': 'run_accession,fastq_ftp,submitted_ftp', 'format': 'json'},
+            timeout=15
+        )
+        if ena_resp.status_code == 200:
+            results = []
+            for record in ena_resp.json():
+                for ftp_field in ['fastq_ftp', 'submitted_ftp']:
+                    for ftp_path in record.get(ftp_field, '').split(';'):
+                        if ftp_path and any(ftp_path.lower().endswith(ext) for ext in RAW_FORMATS):
+                            results.append((ftp_path.split('/')[-1], 'https://' + ftp_path))
+            if results:
+                return results
+    except Exception:
+        pass
+
+    # 2. Fallback: NCBI SRA SDL API — request fastq specifically
+    # Only use if ENA mirror is not yet available. Never accept .sra format.
+    for filetype in ['fastq', 'cram', 'bam']:
+        try:
+            sdl_resp = httpx.get(
+                'https://locate.ncbi.nlm.nih.gov/sdl/2/retrieve',
+                params={'acc': srr, 'location': 's3.us-east-1', 'filetype': filetype},
+                timeout=15
+            )
+            if sdl_resp.status_code == 200:
+                results = []
+                for bundle in sdl_resp.json().get('result', []):
+                    if bundle.get('status') != 200:
+                        continue
+                    for f in bundle.get('files', []):
+                        # Skip any .sra format files — we only want FASTQ/CRAM/BAM
+                        fname = f.get('name', '')
+                        if fname.endswith('.sra') or f.get('type') == 'sra':
+                            continue
+                        for loc in f.get('locations', []):
+                            url = loc.get('link', '')
+                            if url and not url.endswith('.sra'):
+                                if not fname:
+                                    fname = url.split('/')[-1].split('?')[0]
+                                results.append((fname, url))
+                if results:
+                    return results
+        except Exception:
+            pass
+
+    # No FASTQ/CRAM/BAM available — caller should fall back to BioProject landing page link
+    return []
 ```
 
 ---
 
-**SRA (standalone, not via GEO)** — enumerate runs via ENA:
+**SRA (standalone, not via GEO)** — enumerate runs via ENA with NCBI SDL fallback:
 ```python
 def get_file_list_sra(sra_study_accession: str) -> list[tuple[str, str]]:
-    # Get all runs for the study/project
-    resp = httpx.get(
-        'https://www.ebi.ac.uk/ena/portal/api/filereport',
-        params={'accession': sra_study_accession, 'result': 'read_run',
-                'fields': 'run_accession,fastq_ftp,submitted_ftp', 'format': 'json'},
-        timeout=30
-    )
+    # Get all runs for the study/project via ENA first
     files = []
-    for record in resp.json():
-        for ftp_field in ['fastq_ftp', 'submitted_ftp']:
-            for ftp_path in record.get(ftp_field, '').split(';'):
-                if ftp_path:
-                    files.append((ftp_path.split('/')[-1], 'https://' + ftp_path))
+    try:
+        resp = httpx.get(
+            'https://www.ebi.ac.uk/ena/portal/api/filereport',
+            params={'accession': sra_study_accession, 'result': 'read_run',
+                    'fields': 'run_accession,fastq_ftp,submitted_ftp', 'format': 'json'},
+            timeout=30
+        )
+        if resp.status_code == 200:
+            for record in resp.json():
+                for ftp_field in ['fastq_ftp', 'submitted_ftp']:
+                    for ftp_path in record.get(ftp_field, '').split(';'):
+                        if ftp_path:
+                            files.append((ftp_path.split('/')[-1], 'https://' + ftp_path))
+    except Exception:
+        pass
+
+    if files:
+        return files  # apply 100-file cap in caller
+
+    # Fallback: fetch run list from NCBI runinfo, then get URLs run-by-run via SDL
+    # (ENA mirror may not yet have this study if recently submitted)
+    from Bio import Entrez
+    try:
+        handle = Entrez.esearch(db='sra', term=sra_study_accession)
+        search = Entrez.read(handle)
+        for sra_id in search.get('IdList', [])[:50]:
+            run_handle = Entrez.efetch(db='sra', id=sra_id, rettype='runinfo', retmode='text')
+            runinfo_csv = run_handle.read()
+            if isinstance(runinfo_csv, bytes):
+                runinfo_csv = runinfo_csv.decode('utf-8')
+            lines = runinfo_csv.strip().split('\n')
+            headers = lines[0].split(',') if lines else []
+            for line in lines[1:]:
+                row = dict(zip(headers, line.split(',')))
+                srr = row.get('Run', '')
+                if srr:
+                    files.extend(get_sra_run_fastq_urls(srr))
+    except Exception:
+        pass
+
     return files  # apply 100-file cap in caller
 ```
 
@@ -1295,41 +1419,63 @@ Validation warnings are expected at this stage because some required fields (e.g
 
 ## Wiki Template
 
-Use this for the project wiki page:
+Use this for the project wiki page. Before filling the template, **write a plain-language summary** of the study: 2–3 sentences that a non-specialist could understand, covering what disease or biological question was studied, what experiment was done, and what was found or deposited. Draw on the abstract and any available publication metadata.
 
 ```markdown
-## Auto-Discovered External Study
+## {publication_title}
 
-**Publication Title:** {publication_title}
-**PMID:** {pmid or 'Not available'}
-**DOI:** {doi or 'Not available'}
+**Disease Focus:** {disease_focus}
+**Assay Type:** {assay_types}
+**Species:** {species}
+**Tissue / Cell Type:** {tissue_types}
+**Publication:** {pmid_link_or_doi_or_Not available}
+**Authors:** {authors_first_last_et_al}
+**Publication Date:** {pub_date_or_Not available}
 
 ---
 
-### Abstract
+### Summary
+
+{plain_language_summary}
+
+---
+
+### Background
+
 {abstract}
 
 ---
 
-### Datasets Included
-| Repository | Accession | Data Types | Access |
-|-----------|-----------|-----------|--------|
-| {repo} | {accession} | {data_types} | {access_type} |
+### Datasets
+
+| Repository | Accession | Data Types | Files | Access |
+|-----------|-----------|-----------|-------|--------|
+| {repo} | [{accession}]({landing_url}) | {data_types} | {file_count} | Open |
 
 ---
 
-### NF Relevance Assessment
+### Study Details
+
 | Field | Value |
 |-------|-------|
-| Relevance Score | {relevance_score} |
 | Disease Focus | {disease_focus} |
-| Assay Types | {assay_types} |
+| Assay | {assay_types} |
 | Species | {species} |
-| Tissue Types | {tissue_types} |
+| Tissue / Cell Type | {tissue_types} |
+| Sample Count | {sample_count} |
+| NF Relevance Score | {relevance_score} |
 
 ---
 
-> **Note:** Created automatically by the NF Data Contributor Agent (discovery date: {today}).
-> Status: **pending data manager review**.
-> Metadata extracted by `claude-sonnet-4-6`.
+*This project was ingested automatically by the NF Data Contributor Agent on {today} and is pending data manager review.*
 ```
+
+### Plain-language summary guidance
+
+Write the summary yourself through direct reasoning — do not call an API. Pull from the abstract and scored metadata. Aim for:
+- Sentence 1: the disease/condition studied and why it matters
+- Sentence 2: what data was generated (assay, model system, experimental design)
+- Sentence 3: what was found or what the dataset enables (if determinable from the abstract)
+
+Example (from a NF1 JMML mouse model study):
+> NF1 is a genetic disorder that predisposes patients to a rare childhood leukemia called JMML. This study generated RNA-seq data from a novel humanized mouse model carrying a loss-of-function NF1 mutation, comparing 5 mutant and 5 wild-type animals. The dataset provides transcriptomic profiles of bone marrow hematopoietic cells and supports investigation of the molecular mechanisms driving NF1-associated JMML.
