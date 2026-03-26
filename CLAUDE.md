@@ -312,7 +312,7 @@ Action: log as `rejected_duplicate`, do nothing.
 The publication already exists in the portal OR in the agent's own state table, BUT at least one dataset accession from this publication group is NOT yet present. This means we received the data from a different source, or it was deposited in an additional repository after initial ingestion.
 
 Two sub-cases:
-- **Portal study exists** (found in `syn52694652`): Look up the `studyId` column to find the Synapse project ID. Add new dataset folder(s) to that existing project's `Raw Data/` folder.
+- **Portal study exists** (found in `syn52694652`): Look up the `studyId` column to find the Synapse project ID. Add a new `{Repo}_{AccessionID}_files/` folder inside `Raw Data/` with File entities, and a new Dataset entity as a direct child of the project.
 - **Agent-created project exists** (found in agent state table with `synapse_project_id` set): Add the new dataset folder to that project.
 
 Action: add new dataset subfolder(s) to the existing project. Log each added accession as `dataset_added`.
@@ -450,23 +450,26 @@ If a publication title is not available (no PMID, no paper), fall back to the re
 
 ### Folder Hierarchy — Multiple Datasets Per Project
 
-Each repository accession becomes a **Synapse Dataset entity** (not a plain folder) inside `Raw Data/`. Individual files within that Dataset are `File` entities with `externalURL` pointing to direct download URLs.
+Each repository accession becomes a **Synapse Dataset entity** that is a **direct child of the project**. This is required for it to appear in the project's Datasets tab. Files live in a folder inside `Raw Data/` and are referenced by the Dataset entity as items.
 
 ```
-{Publication Title}/                        ← Synapse Project
-├── Raw Data/                               ← Folder
-│   ├── GEO_{AccessionID}                   ← Dataset entity
-│   │   ├── GSE301187_counts.txt.gz         ← File (externalURL = GEO FTP URL)
-│   │   ├── GSE301187_metadata.txt          ← File (externalURL = GEO FTP URL)
-│   │   └── [SRA runs listed here too       ← see GEO+SRA note below]
-│   ├── SRA_{BioProjectID}                  ← Dataset entity (if SRA-only accession)
-│   │   ├── SRR123456_1.fastq.gz            ← File (externalURL = ENA https URL)
-│   │   └── SRR123456_2.fastq.gz            ← File (externalURL = ENA https URL)
-│   └── PRIDE_{AccessionID}                 ← Dataset entity
-│       ├── sample1.raw                     ← File (externalURL = PRIDE FTP URL)
-│       └── sample1.mzML                    ← File (externalURL = PRIDE FTP URL)
-├── Analysis/                               ← Folder
-└── Source Metadata/                        ← Folder
+{Publication Title}/                             ← Synapse Project
+├── GEO_{AccessionID}                            ← Dataset entity (direct child — visible in Datasets tab)
+├── SRA_{BioProjectID}                           ← Dataset entity (direct child — if SRA-only accession)
+├── PRIDE_{AccessionID}                          ← Dataset entity (direct child)
+├── Raw Data/                                    ← Folder
+│   ├── GEO_{AccessionID}_files/                 ← Folder (holds File entities)
+│   │   ├── GSE301187_counts.txt.gz              ← File (path = GEO FTP URL, synapseStore=False)
+│   │   ├── GSE301187_metadata.txt               ← File (path = GEO FTP URL, synapseStore=False)
+│   │   └── SRR123456_1.fastq.gz                 ← File (path = ENA URL, synapseStore=False)
+│   ├── SRA_{BioProjectID}_files/                ← Folder (if SRA-only accession)
+│   │   ├── SRR123456_1.fastq.gz                 ← File
+│   │   └── SRR123456_2.fastq.gz                 ← File
+│   └── PRIDE_{AccessionID}_files/               ← Folder
+│       ├── sample1.raw                          ← File
+│       └── sample1.mzML                         ← File
+├── Analysis/                                    ← Folder
+└── Source Metadata/                             ← Folder
     └── wiki: abstract, authors, DOI, PMID
 ```
 
@@ -1141,14 +1144,32 @@ raw_data_folder = next((c for c in children if c.get('name') == 'Raw Data'), Non
 
 if raw_data_folder:
     raw_folder_id = raw_data_folder.get('id')
-    # Add new dataset subfolder
-    new_folder = syn.store(Folder(
-        name=f'{repository}_{accession_id}',
+
+    # Create files folder inside Raw Data/
+    files_folder = syn.store(Folder(
+        name=f'{repository}_{accession_id}_files',
         parentId=raw_folder_id
     ))
-    # Enumerate direct download URLs for this accession and create File entities
+    # Enumerate direct download URLs and create File entities inside files_folder
     # (see "How to Get Direct Download URLs Per Repository" section above)
     # Fall back to ExternalLink if controlled access or >100 files
+
+    # Create Dataset entity as direct child of the PROJECT (not Raw Data/)
+    # so it appears in the project's Datasets tab
+    import json
+    ds_body = syn.restPOST('/entity', json.dumps({
+        'name': f'{repository}_{accession_id}',
+        'parentId': existing_project_id,   # ← project root
+        'concreteType': 'org.sagebionetworks.repo.model.table.Dataset',
+    }))
+    ds_id = ds_body['id']
+    # Add files as dataset items
+    ds_body = syn.restGET(f'/entity/{ds_id}')
+    ds_body['items'] = [
+        {'entityId': c['id'], 'versionNumber': syn.get(c['id'], downloadFile=False).properties.get('versionNumber', 1)}
+        for c in syn.getChildren(files_folder.id, includeTypes=['file'])
+    ]
+    syn.restPUT(f'/entity/{ds_id}', json.dumps(ds_body))
 ```
 
 If the existing project has a different folder structure (it's a portal-managed project, not agent-created), **do not attempt to write to it** — log a note that a data manager should manually link the dataset, and create a JIRA ticket flagged as "manual action required."
