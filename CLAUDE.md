@@ -312,18 +312,119 @@ If a publication title is not available (no PMID, no paper), fall back to a desc
 ```
 {Publication Title}/
 ├── Raw Data/
-│   ├── GEO_{AccessionID}/          ← one subfolder per repository accession
-│   │   └── Source: {accession_id}  ← ExternalLink → data_url
-│   ├── SRA_{AccessionID}/          ← additional dataset from same paper
-│   │   └── Source: {accession_id}
-│   └── PRIDE_{AccessionID}/        ← proteomics from same paper
-│       └── Source: {accession_id}
+│   ├── GEO_{AccessionID}/            ← dataset subfolder
+│   │   ├── sample1_counts.txt.gz     ← File entity (externalURL = direct download)
+│   │   ├── sample2_counts.txt.gz     ← File entity (externalURL = direct download)
+│   │   └── README.txt                ← File entity or ExternalLink to landing page
+│   ├── SRA_{AccessionID}/
+│   │   ├── SRR123456_1.fastq.gz      ← File entity (externalURL = ENA FTP URL)
+│   │   └── SRR123456_2.fastq.gz
+│   └── PRIDE_{AccessionID}/
+│       ├── sample.raw                ← File entity (externalURL = PRIDE FTP URL)
+│       └── sample.mzML
 ├── Analysis/
 └── Source Metadata/
     └── Publication metadata (wiki with abstract, authors, DOI, PMID)
 ```
 
 Each dataset subfolder is annotated with the accession-specific metadata (assay, file format, etc.). The project itself is annotated with publication-level metadata.
+
+### Direct Download URLs — Critical Requirement
+
+**Portal users must be able to download data directly through the Synapse interface.** Use `File` entities with `externalURL` for all open-access files with direct download URLs. Only fall back to `ExternalLink` (landing page link) when direct file URLs are not available (controlled access repositories like dbGaP, EGA).
+
+**Use `File` with `externalURL`** (downloadable through Synapse):
+```python
+from synapseclient import File
+
+file_entity = File(
+    name=filename,                   # e.g. "GSE301187_counts.txt.gz"
+    parentId=dataset_folder_id,
+    synapseStore=False,              # do not upload to Synapse storage
+    externalURL=direct_download_url  # direct URL to the file
+)
+file_entity = syn.store(file_entity)
+```
+
+**Use `ExternalLink`** (fallback for controlled access or landing pages only):
+```python
+from synapseclient import Link
+link = syn.store(Link(targetId=landing_page_url, name=f'Source: {accession_id}', parentId=folder_id))
+```
+
+### How to Get Direct Download URLs Per Repository
+
+**GEO** — enumerate supplementary files via GEO FTP:
+```python
+# GEO supplementary files base URL
+ftp_base = f"https://ftp.ncbi.nlm.nih.gov/geo/series/{accession[:-3]}nnn/{accession}/suppl/"
+# Or use the GEO SOFT metadata to extract file URLs:
+# Entrez.efetch(db='gds', id=gds_id, rettype='soft') contains FTPLink fields
+# Each "!Series_supplementary_file" line is a direct ftp:// URL — use as externalURL
+```
+If GEO has no supplementary files (only raw counts in SRA), link to the GEO landing page and note that raw reads are in SRA.
+
+**SRA** — use ENA's direct FASTQ URLs (open, no auth required):
+```python
+# ENA provides direct download for SRA runs:
+# https://www.ebi.ac.uk/ena/portal/api/filereport?accession={SRR_ID}&result=read_run&fields=fastq_ftp
+# Returns FTP paths — convert ftp:// to https:// for externalURL
+```
+
+**Zenodo** — file URLs are in the API response:
+```python
+# hit['files'] contains list of {'key': filename, 'links': {'self': download_url}}
+# Use links['self'] as externalURL
+```
+
+**Figshare** — file download URLs in API:
+```python
+# article['files'] contains list of {'name': filename, 'download_url': url}
+```
+
+**OSF** — files via OSF API:
+```python
+# GET https://api.osf.io/v2/nodes/{node_id}/files/osfstorage/
+# Each file has links.download as the direct URL
+```
+
+**ArrayExpress/BioStudies** — FTP direct downloads:
+```python
+# Study FTP root: ftp://ftp.ebi.ac.uk/biostudies/fire/{prefix}/{accession}/
+# List files via: https://www.ebi.ac.uk/biostudies/api/v1/studies/{accession}/info
+```
+
+**EGA** — controlled access, no direct download:
+Use `ExternalLink` to `https://ega-archive.org/studies/{accession}`. Note `accessType=controlled` in annotations.
+
+**dbGaP** — controlled access, no direct download:
+Use `ExternalLink` to `https://www.ncbi.nlm.nih.gov/projects/gap/cgi-bin/study.cgi?study_id={accession}`. Note `accessType=controlled`.
+
+**PRIDE** — FTP direct downloads:
+```python
+# PRIDE FTP root: ftp://ftp.pride.ebi.ac.uk/pride/data/archive/{YYYY}/{MM}/{accession}/
+# File listing via: https://www.ebi.ac.uk/pride/ws/archive/v2/projects/{accession}/files
+# Each file has downloadLink field
+```
+
+**MetaboLights** — FTP direct downloads:
+```python
+# Base FTP: ftp://ftp.ebi.ac.uk/pub/databases/metabolights/studies/public/{accession}/
+# File listing via: https://www.ebi.ac.uk/metabolights/ws/studies/{accession}/files
+```
+
+**NCI PDC** — direct download via AWS S3 presigned URLs from PDC API:
+```python
+# Use PDC fileMetadata GraphQL query to get signedUrl for each file
+# These expire; use the PDC file download page as ExternalLink fallback
+```
+
+### File Count Limits Per Dataset
+
+If a repository accession has more than **100 individual files**, do not create one File entity per file. Instead:
+- Create a single `ExternalLink` to the repository landing page
+- Add a note in the dataset folder wiki: "This dataset contains N files. Browse and download at {url}"
+- This prevents projects with thousands of FASTQ files from becoming unusable in the portal
 
 ### Required Annotations
 
@@ -387,7 +488,9 @@ if raw_data_folder:
         name=f'{repository}_{accession_id}',
         parentId=raw_folder_id
     ))
-    # Annotate and add ExternalLink as usual
+    # Enumerate direct download URLs for this accession and create File entities
+    # (see "How to Get Direct Download URLs Per Repository" section above)
+    # Fall back to ExternalLink if controlled access or >100 files
 ```
 
 If the existing project has a different folder structure (it's a portal-managed project, not agent-created), **do not attempt to write to it** — log a note that a data manager should manually link the dataset, and create a JIRA ticket flagged as "manual action required."
