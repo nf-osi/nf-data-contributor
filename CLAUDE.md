@@ -596,81 +596,313 @@ from synapseclient import Link
 link = syn.store(Link(targetId=landing_page_url, name=f'Source: {accession_id}', parentId=folder_id))
 ```
 
-### How to Get Direct Download URLs Per Repository
+### General File Enumeration Algorithm
 
-**GEO** — enumerate supplementary files via GEO FTP:
-```python
-# GEO supplementary files base URL
-ftp_base = f"https://ftp.ncbi.nlm.nih.gov/geo/series/{accession[:-3]}nnn/{accession}/suppl/"
-# Or use the GEO SOFT metadata to extract file URLs:
-# Entrez.efetch(db='gds', id=gds_id, rettype='soft') contains FTPLink fields
-# Each "!Series_supplementary_file" line is a direct ftp:// URL — use as externalURL
-```
-If GEO has no supplementary files (only raw counts in SRA), link to the GEO landing page and note that raw reads are in SRA.
+Apply this pattern for **every** repository. The goal is always: enumerate individual files with direct download URLs, falling back to a landing page link only when enumeration is impossible (controlled access) or impractical (>100 files).
 
-**SRA** — use ENA's direct FASTQ URLs (open, no auth required):
 ```python
-# ENA provides direct download for SRA runs:
-# https://www.ebi.ac.uk/ena/portal/api/filereport?accession={SRR_ID}&result=read_run&fields=fastq_ftp
-# Returns FTP paths — convert ftp:// to https:// for externalURL
+def populate_dataset_with_files(syn, dataset_id, accession_id, repository, landing_url):
+    """
+    General pattern used for all repositories.
+    Returns the number of File entities created.
+    """
+    files = get_file_list(accession_id, repository)  # repo-specific, see below
+    # files = list of (filename: str, download_url: str)
+
+    if not files:
+        # No enumerable files (controlled access, API error, etc.)
+        # Fall back to a single landing-page link
+        syn.store(Link(targetId=landing_url,
+                       name=f'Source: {accession_id}',
+                       parentId=dataset_id))
+        return 0
+
+    if len(files) > 100:
+        # Too many files — create manifest link instead
+        syn.store(Link(targetId=landing_url,
+                       name=f'Source: {accession_id} ({len(files)} files — browse at repository)',
+                       parentId=dataset_id))
+        return 0
+
+    for filename, download_url in files:
+        syn.store(File(
+            name=filename,
+            parentId=dataset_id,
+            synapseStore=False,
+            externalURL=download_url,
+        ))
+    return len(files)
 ```
 
-**Zenodo** — file URLs are in the API response:
+### Per-Repository `get_file_list` Implementations
+
+---
+
+**GEO** — supplementary files from SOFT metadata + linked SRA runs via ENA:
 ```python
-# hit['files'] contains list of {'key': filename, 'links': {'self': download_url}}
-# Use links['self'] as externalURL
+import re, httpx
+from Bio import Entrez
+
+def get_file_list_geo(gds_numeric_id: str, geo_accession: str) -> list[tuple[str, str]]:
+    files = []
+
+    # Part A: GEO supplementary files (processed counts, matrices, etc.)
+    handle = Entrez.efetch(db='gds', id=gds_numeric_id, rettype='soft', retmode='text')
+    soft_text = handle.read()
+    ftp_urls = re.findall(r'!Series_supplementary_file\s*=\s*(ftp://\S+)', soft_text)
+    for url in ftp_urls:
+        filename = url.rstrip('/').split('/')[-1]
+        https_url = url.replace('ftp://ftp.ncbi.nlm.nih.gov/', 'https://ftp.ncbi.nlm.nih.gov/')
+        files.append((filename, https_url))
+
+    # Part B: linked SRA runs → per-run FASTQ via ENA (cap at 50 runs)
+    link_handle = Entrez.elink(dbfrom='gds', db='sra', id=gds_numeric_id)
+    link_records = Entrez.read(link_handle)
+    sra_ids = [l['Id'] for ls in link_records
+               for db in ls.get('LinkSetDb', [])
+               for l in db.get('Link', [])][:50]
+
+    for sra_id in sra_ids:
+        run_handle = Entrez.efetch(db='sra', id=sra_id, rettype='runinfo', retmode='text')
+        runinfo_csv = run_handle.read().strip()
+        lines = runinfo_csv.split('\n')
+        if len(lines) < 2:
+            continue
+        headers = lines[0].split(',')
+        for line in lines[1:]:
+            row = dict(zip(headers, line.split(',')))
+            srr = row.get('Run', '')
+            if not srr:
+                continue
+            ena_resp = httpx.get(
+                'https://www.ebi.ac.uk/ena/portal/api/filereport',
+                params={'accession': srr, 'result': 'read_run',
+                        'fields': 'run_accession,fastq_ftp', 'format': 'json'},
+                timeout=15
+            )
+            if ena_resp.status_code != 200:
+                continue
+            for record in ena_resp.json():
+                for ftp_path in record.get('fastq_ftp', '').split(';'):
+                    if ftp_path:
+                        fname = ftp_path.split('/')[-1]
+                        https_url = 'https://' + ftp_path
+                        files.append((fname, https_url))
+
+    return files
 ```
 
-**Figshare** — file download URLs in API:
+---
+
+**SRA (standalone, not via GEO)** — enumerate runs via ENA:
 ```python
-# article['files'] contains list of {'name': filename, 'download_url': url}
+def get_file_list_sra(sra_study_accession: str) -> list[tuple[str, str]]:
+    # Get all runs for the study/project
+    resp = httpx.get(
+        'https://www.ebi.ac.uk/ena/portal/api/filereport',
+        params={'accession': sra_study_accession, 'result': 'read_run',
+                'fields': 'run_accession,fastq_ftp,submitted_ftp', 'format': 'json'},
+        timeout=30
+    )
+    files = []
+    for record in resp.json():
+        for ftp_field in ['fastq_ftp', 'submitted_ftp']:
+            for ftp_path in record.get(ftp_field, '').split(';'):
+                if ftp_path:
+                    files.append((ftp_path.split('/')[-1], 'https://' + ftp_path))
+    return files  # apply 100-file cap in caller
 ```
 
-**OSF** — files via OSF API:
+---
+
+**Zenodo** — files are in the record API response:
 ```python
-# GET https://api.osf.io/v2/nodes/{node_id}/files/osfstorage/
-# Each file has links.download as the direct URL
+def get_file_list_zenodo(record_id: str) -> list[tuple[str, str]]:
+    resp = httpx.get(f'https://zenodo.org/api/records/{record_id}', timeout=15)
+    resp.raise_for_status()
+    data = resp.json()
+    files = []
+    for f in data.get('files', []):
+        filename = f.get('key', '') or f.get('filename', '')
+        # v3 API: links.self is the download URL
+        download_url = f.get('links', {}).get('self') or f.get('links', {}).get('download')
+        if filename and download_url:
+            files.append((filename, download_url))
+    return files
 ```
 
-**ArrayExpress/BioStudies** — FTP direct downloads:
+---
+
+**Figshare** — files listed in the article detail endpoint:
 ```python
-# Study FTP root: ftp://ftp.ebi.ac.uk/biostudies/fire/{prefix}/{accession}/
-# List files via: https://www.ebi.ac.uk/biostudies/api/v1/studies/{accession}/info
+def get_file_list_figshare(article_id: str) -> list[tuple[str, str]]:
+    resp = httpx.get(f'https://api.figshare.com/v2/articles/{article_id}', timeout=15)
+    resp.raise_for_status()
+    data = resp.json()
+    files = []
+    for f in data.get('files', []):
+        filename = f.get('name', '')
+        download_url = f.get('download_url', '')
+        if filename and download_url:
+            files.append((filename, download_url))
+    return files
 ```
+
+---
+
+**OSF** — files via the storage API (handles pagination):
+```python
+def get_file_list_osf(node_id: str) -> list[tuple[str, str]]:
+    files = []
+    url = f'https://api.osf.io/v2/nodes/{node_id}/files/osfstorage/'
+    while url:
+        resp = httpx.get(url, timeout=15)
+        if resp.status_code != 200:
+            break
+        data = resp.json()
+        for item in data.get('data', []):
+            if item.get('attributes', {}).get('kind') == 'file':
+                name = item['attributes'].get('name', '')
+                download_url = item.get('links', {}).get('download', '')
+                if name and download_url:
+                    files.append((name, download_url))
+        url = data.get('links', {}).get('next')  # follow pagination
+    return files
+```
+
+---
+
+**ArrayExpress / BioStudies** — file listing via BioStudies API:
+```python
+def get_file_list_arrayexpress(accession: str) -> list[tuple[str, str]]:
+    resp = httpx.get(
+        f'https://www.ebi.ac.uk/biostudies/api/v1/studies/{accession}/info',
+        timeout=15
+    )
+    if resp.status_code != 200:
+        return []
+    data = resp.json()
+    files = []
+    for section in data.get('section', {}).get('subsections', []):
+        for link in section.get('links', []):
+            url = link.get('url', '')
+            name = link.get('attributes', {}).get('name', url.split('/')[-1])
+            if url and (url.startswith('ftp://') or url.startswith('https://')):
+                https_url = url.replace('ftp://ftp.ebi.ac.uk/', 'https://ftp.ebi.ac.uk/')
+                files.append((name, https_url))
+    return files
+```
+
+---
+
+**PRIDE / ProteomeXchange** — files via PRIDE REST API:
+```python
+def get_file_list_pride(accession: str) -> list[tuple[str, str]]:
+    files = []
+    page = 0
+    while True:
+        resp = httpx.get(
+            f'https://www.ebi.ac.uk/pride/ws/archive/v2/projects/{accession}/files',
+            params={'page': page, 'pageSize': 100, 'sortConditions': 'fileName'},
+            timeout=15
+        )
+        if resp.status_code != 200:
+            break
+        data = resp.json()
+        items = data.get('_embedded', {}).get('files', [])
+        if not items:
+            break
+        for f in items:
+            name = f.get('fileName', '')
+            # downloadLink is a direct FTP or HTTPS URL
+            download_url = f.get('downloadLink', '')
+            if name and download_url:
+                https_url = download_url.replace('ftp://', 'https://')
+                files.append((name, https_url))
+        if len(files) >= 100 or not data.get('_links', {}).get('next'):
+            break
+        page += 1
+    return files
+```
+
+---
+
+**MetaboLights** — files via MetaboLights REST API:
+```python
+def get_file_list_metabolights(accession: str) -> list[tuple[str, str]]:
+    resp = httpx.get(
+        f'https://www.ebi.ac.uk/metabolights/ws/studies/{accession}/files',
+        timeout=15
+    )
+    if resp.status_code != 200:
+        return []
+    data = resp.json()
+    files = []
+    for f in data.get('study', []):
+        name = f.get('file', '')
+        # Build FTP URL from accession + filename
+        ftp_base = f'https://ftp.ebi.ac.uk/pub/databases/metabolights/studies/public/{accession}/'
+        if name and not f.get('directory', False):
+            files.append((name, ftp_base + name))
+    return files
+```
+
+---
 
 **EGA** — controlled access, no direct download:
-Use `ExternalLink` to `https://ega-archive.org/studies/{accession}`. Note `accessType=controlled` in annotations.
+```python
+def get_file_list_ega(accession: str) -> list[tuple[str, str]]:
+    return []  # always falls back to ExternalLink; access requires application
+# Use ExternalLink to: https://ega-archive.org/studies/{accession}
+# Set accessType=controlled in annotations
+```
+
+---
 
 **dbGaP** — controlled access, no direct download:
-Use `ExternalLink` to `https://www.ncbi.nlm.nih.gov/projects/gap/cgi-bin/study.cgi?study_id={accession}`. Note `accessType=controlled`.
-
-**PRIDE** — FTP direct downloads:
 ```python
-# PRIDE FTP root: ftp://ftp.pride.ebi.ac.uk/pride/data/archive/{YYYY}/{MM}/{accession}/
-# File listing via: https://www.ebi.ac.uk/pride/ws/archive/v2/projects/{accession}/files
-# Each file has downloadLink field
+def get_file_list_dbgap(accession: str) -> list[tuple[str, str]]:
+    return []  # always falls back to ExternalLink; access requires dbGaP application
+# Use ExternalLink to: https://www.ncbi.nlm.nih.gov/projects/gap/cgi-bin/study.cgi?study_id={accession}
+# Set accessType=controlled in annotations
 ```
 
-**MetaboLights** — FTP direct downloads:
-```python
-# Base FTP: ftp://ftp.ebi.ac.uk/pub/databases/metabolights/studies/public/{accession}/
-# File listing via: https://www.ebi.ac.uk/metabolights/ws/studies/{accession}/files
-```
+---
 
-**NCI PDC** — direct download via AWS S3 presigned URLs from PDC API:
+**NCI PDC** — direct file URLs via PDC GraphQL (presigned S3, may expire):
 ```python
-# Use PDC fileMetadata GraphQL query to get signedUrl for each file
-# These expire; use the PDC file download page as ExternalLink fallback
+def get_file_list_pdc(pdc_study_id: str) -> list[tuple[str, str]]:
+    query = f"""{{
+      fileMetadata(pdc_study_id: "{pdc_study_id}" acceptDUA: true) {{
+        file_name
+        file_location
+        file_size
+        md5sum
+        signedUrl {{ url }}
+      }}
+    }}"""
+    resp = httpx.post('https://pdc.cancer.gov/graphql', json={'query': query}, timeout=30)
+    if resp.status_code != 200:
+        return []
+    files = []
+    for f in resp.json().get('data', {}).get('fileMetadata', []):
+        name = f.get('file_name', '')
+        url = f.get('signedUrl', {}).get('url', '') or f.get('file_location', '')
+        if name and url:
+            files.append((name, url))
+    return files
+# Note: signedUrls expire (~1 hour). If they expire before the user downloads,
+# they will get a 403. Consider using file_location (stable S3 path) instead if available.
 ```
 
 ### File Count Limits Per Dataset
 
-If a Dataset entity would contain more than **100 individual File entities** (e.g., a study with 200 samples × 2 FASTQ files = 400 files), do not create one File per file. Instead:
-- Create a single `File` entity named `file_manifest.txt` whose `externalURL` points to a manifest or the repository landing page
-- Add a wiki on the Dataset: "This dataset contains N files. Browse and download individually at {landing_page_url}"
-- This prevents large studies from creating thousands of Synapse entities
+If `get_file_list` returns more than **100 files**, do not create individual File entities. Instead:
+- Call `populate_dataset_with_files` — it will automatically create a single `ExternalLink` to the landing page
+- Annotate the Dataset with a note: `fileCount: N` so data managers know the scope
+- This applies to all repositories equally
 
-For GEO+SRA specifically: if the GEO series has >50 SRA runs, create File entities for the GEO supplementary files only, and add one additional File entity pointing to the SRA BioProject page for raw reads.
+For GEO+SRA specifically: the combined GEO supplementary + SRA FASTQ count can be large. If the total exceeds 100, create File entities for the GEO supplementary files only, and add one ExternalLink to the SRA BioProject for raw reads.
 
 ### Required Annotations
 
@@ -775,6 +1007,95 @@ if base_url and email and token:
     resp = httpx.post(f'{base_url}/rest/api/3/issue', json=payload, auth=(email, token))
     resp.raise_for_status()
 ```
+
+---
+
+## NF Metadata Schema Binding
+
+After creating each dataset folder and its File entities, bind the appropriate NF-OSI JSON Schema to the dataset folder. This enables the Synapse Curator to validate annotations against the NF data standards and allows data managers to use the Curator Grid UI.
+
+**Repository:** https://github.com/nf-osi/nf-metadata-dictionary (latest: v10.5.3)
+
+### Assay → Schema URI Mapping
+
+| Assay (from scoring) | Schema URI |
+|----------------------|-----------|
+| scrnaSeq | `org.synapse.nf-scrnaseqtemplate` |
+| rnaSeq | `org.synapse.nf-rnaseqtemplate` |
+| wholeGenomeSeq | `org.synapse.nf-wgstemplate` |
+| wholeExomeSeq | `org.synapse.nf-westemplate` |
+| ChIPSeq | `org.synapse.nf-chipseqtemplate` |
+| ATACSeq | `org.synapse.nf-atacseqtemplate` |
+| LC-MS / proteomics | `org.synapse.nf-massspectemplate` |
+| metabolomics | `org.synapse.nf-metabolomicstemplate` |
+| miRNASeq | `org.synapse.nf-mirnaseqtemplate` |
+| SNPArray / geneExpressionArray | `org.synapse.nf-genomicsarraytemplate` |
+| flowCytometry | `org.synapse.nf-flowcytometrytemplate` |
+| imaging / microscopy | `org.synapse.nf-imagingassaytemplate` |
+| other / unknown | `org.synapse.nf-bulksequencingassaytemplate` |
+
+If an assay doesn't match any known template, fall back to `org.synapse.nf-bulksequencingassaytemplate`.
+
+### Python Pattern
+
+```python
+import time
+
+def bind_nf_schema(syn, dataset_folder_id: str, assay_types: list[str]) -> dict:
+    """Bind the appropriate NF metadata schema to a dataset folder and validate."""
+
+    ASSAY_SCHEMA_MAP = {
+        'scrnaSeq':            'org.synapse.nf-scrnaseqtemplate',
+        'rnaSeq':              'org.synapse.nf-rnaseqtemplate',
+        'wholeGenomeSeq':      'org.synapse.nf-wgstemplate',
+        'wholeExomeSeq':       'org.synapse.nf-westemplate',
+        'ChIPSeq':             'org.synapse.nf-chipseqtemplate',
+        'ATACSeq':             'org.synapse.nf-atacseqtemplate',
+        'LC-MS':               'org.synapse.nf-massspectemplate',
+        'metabolomics':        'org.synapse.nf-metabolomicstemplate',
+        'miRNASeq':            'org.synapse.nf-mirnaseqtemplate',
+        'SNPArray':            'org.synapse.nf-genomicsarraytemplate',
+        'geneExpressionArray': 'org.synapse.nf-genomicsarraytemplate',
+        'flowCytometry':       'org.synapse.nf-flowcytometrytemplate',
+        'imaging':             'org.synapse.nf-imagingassaytemplate',
+    }
+    FALLBACK_SCHEMA = 'org.synapse.nf-bulksequencingassaytemplate'
+
+    # Pick schema for first recognized assay type
+    schema_uri = FALLBACK_SCHEMA
+    for assay in assay_types:
+        if assay in ASSAY_SCHEMA_MAP:
+            schema_uri = ASSAY_SCHEMA_MAP[assay]
+            break
+
+    try:
+        js = syn.service("json_schema")
+        js.bind_json_schema(schema_uri, dataset_folder_id)
+        time.sleep(3)  # allow derived annotations to propagate (async)
+
+        # Validate annotations against schema
+        validation = js.validate(dataset_folder_id)
+        return {
+            'schema_uri': schema_uri,
+            'folder_id': dataset_folder_id,
+            'validation': validation,
+            'status': 'bound'
+        }
+    except Exception as e:
+        print(f"  Warning: schema binding failed for {dataset_folder_id}: {e}")
+        return {'schema_uri': schema_uri, 'folder_id': dataset_folder_id, 'status': 'error', 'error': str(e)}
+```
+
+### When to Bind
+
+Call `bind_nf_schema()` **after** all File entities have been stored inside the dataset folder — binding before child entities exist may cause validation to flag missing children. The typical order within `create_project.py`:
+
+1. Create project → folders → Dataset entity → File entities
+2. Apply annotations to Dataset entity (assay, species, etc.)
+3. `bind_nf_schema(syn, dataset_folder_id, assay_types)` ← bind schema
+4. Print validation result (warnings are expected — data managers complete required fields)
+
+Validation warnings are expected at this stage because some required fields (e.g., `specimenID`, `individualID`) can only be filled by a human curator who has access to the sample metadata. The binding itself is what matters — it registers the folder with the Curator and makes it visible in the Curator Grid UI.
 
 ---
 
