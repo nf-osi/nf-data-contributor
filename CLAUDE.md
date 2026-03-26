@@ -38,7 +38,7 @@ Stop when the counter reaches 50.
 | Variable | Purpose |
 |----------|---------|
 | `SYNAPSE_AUTH_TOKEN` | Authenticates the nf-bot service account. Scoped write access. |
-| `ANTHROPIC_API_KEY` | Claude API for relevance scoring (use `claude-sonnet-4-6`) |
+| `ANTHROPIC_API_KEY` | Authenticates the `claude` CLI process itself. Do NOT use inside generated Python scripts — scoring and normalization are done via agent reasoning, not nested API calls. |
 | `NCBI_API_KEY` | Increases NCBI Entrez rate limit from 3 to 10 req/s |
 | `JIRA_BASE_URL` | e.g. `https://sagebionetworks.jira.com` |
 | `JIRA_USER_EMAIL` | Service account email for JIRA auth |
@@ -386,44 +386,42 @@ Inspect actual column names before writing dedup queries — portal schema may d
 
 ---
 
-## Relevance Scoring with Claude API
+## Relevance Scoring
 
-Score at the **publication group level**, not per-accession. Use the publication title + abstract (from PubMed if PMID is available, otherwise from the richest candidate's abstract):
+Score at the **publication group level**, not per-accession. Use the publication title + abstract (from PubMed if PMID is available, otherwise from the richest candidate's abstract).
+
+**You are already Claude — do this as direct reasoning, not via Python API calls.** Read the publication metadata, reason about it, and write the scoring result as JSON to a file. There is no need to call the Anthropic API from within a Python script; that would just be calling yourself at extra cost and latency.
+
+For each publication group, reason through:
+- Is this about NF1, NF2, schwannomatosis, MPNST, or a related condition?
+- Is it primary experimental data (not a review or meta-analysis)?
+- What assay type(s) are involved?
+- What species, tissue types?
+
+Then write the result directly:
 
 ```python
-import anthropic, json, os
+import json
 
-client = anthropic.Anthropic(api_key=os.environ['ANTHROPIC_API_KEY'])
+# Write your reasoning result directly — no API call needed
+result = {
+  "relevance_score": 0.92,          # your assessment 0.0–1.0
+  "disease_focus": ["NF1"],
+  "assay_types": ["RNA-seq"],
+  "species": ["Mus musculus"],
+  "tissue_types": ["bone marrow"],
+  "is_primary_data": True,
+  "access_notes": "open access via GEO",
+  "suggested_project_name": "Novel NF1 mouse model of JMML"
+}
 
-message = client.messages.create(
-    model="claude-sonnet-4-6",
-    max_tokens=1024,
-    system="""You are an expert biomedical curator for the NF Data Portal.
-Assess whether a publication's datasets are relevant to NF1, NF2, schwannomatosis,
-or related conditions. Respond with valid JSON only.""",
-    messages=[{
-        "role": "user",
-        "content": f"""Evaluate this publication and its associated datasets:
-
-Publication Title: {publication_title}
-Abstract: {abstract[:3000]}
-Repositories / Accessions: {', '.join(f"{d['source_repository']}:{d['accession_id']}" for d in datasets)}
-
-Return JSON with exactly these fields:
-{{
-  "relevance_score": <float 0.0-1.0>,
-  "disease_focus": <list from ["NF1","NF2","SWN","MPNST","NF-general"]>,
-  "assay_types": <list using NF Portal vocab>,
-  "species": <list e.g. ["Human","Mouse"]>,
-  "tissue_types": <list e.g. ["neurofibroma","schwannoma"]>,
-  "is_primary_data": <bool>,
-  "access_notes": <string>,
-  "suggested_project_name": <string — clean publication title for Synapse project name, max 250 chars, do NOT truncate mid-word>
-}}"""
-    }]
-)
-result = json.loads(message.content[0].text)
+with open('/tmp/nf_agent/scored.json', 'w') as f:
+    json.dump(results, f, indent=2)
 ```
+
+Similarly, **annotation normalization** (mapping raw extracted values to valid schema enum terms) should be done as direct reasoning — read the raw values, read the valid enum list, write the best matches. No Python API call required.
+
+The `ANTHROPIC_API_KEY` environment variable is only needed by the `claude` CLI process itself. Do not use it inside generated Python scripts.
 
 ### Relevance Thresholds
 - Minimum score: **0.70**
@@ -1020,47 +1018,28 @@ Dump all extracted key-value pairs into a flat `raw_metadata` dict before callin
 
 #### Step C — Normalize raw values to schema terms using Claude
 
-Once you have raw extracted values AND the valid enum list from Step A, ask Claude to map them:
+Once you have the raw extracted values (Step B) and the valid enum lists (Step A), **do the mapping yourself through direct reasoning** — read the raw value, read the valid options, pick the best match or null. Write the result directly to a JSON file. No Python API call needed.
 
 ```python
-import anthropic, json, os
+import json
 
-client = anthropic.Anthropic(api_key=os.environ['ANTHROPIC_API_KEY'])
+# You (the agent) reason through each field and write the normalized result directly.
+# Example: raw 'bone marrow' + valid organ values → pick 'bone marrow' or closest match
+normalized = {
+    'assay': 'RNA-seq',                          # matched from raw 'RNA-Seq'
+    'species': 'Mus musculus',                   # matched from raw 'Mus musculus'
+    'diagnosis': 'Neurofibromatosis type 1',     # matched from raw 'NF1'
+    'organ': 'bone marrow',                      # matched from GEO characteristics
+    'sex': 'male',                               # from GEO sample characteristics
+    'platform': 'Illumina NovaSeq X Plus',       # from SRA runinfo Model column
+    'libraryPreparationMethod': 'unknown',       # closest valid term when prep not specified
+    'libraryStrand': 'Unstranded',               # from SRA LibraryLayout=PAIRED
+    'dataSubtype': 'raw',                        # raw reads
+    'nf1Genotype': 'Nf1 fl/fl',                  # from GEO characteristics genotype field
+}
 
-def normalize_annotations_with_schema(raw_metadata: dict, enums: dict) -> dict:
-    """
-    raw_metadata: dict of field → raw extracted string
-    enums: dict of field → list of valid enum values (from fetch_schema_enums)
-    Returns: dict of field → best-matching valid enum value (or None if no match)
-    """
-    # Only include fields where we have both a raw value and an enum list
-    fields_to_map = {
-        k: {'raw': raw_metadata[k], 'valid_values': enums.get(k, [])}
-        for k in raw_metadata
-        if raw_metadata[k] and enums.get(k)
-    }
-
-    if not fields_to_map:
-        return {}
-
-    prompt = f"""Map each raw metadata value to the closest valid controlled term.
-If no valid term matches reasonably, use null.
-
-Fields to map:
-{json.dumps(fields_to_map, indent=2)}
-
-Return JSON with the same field names, each mapped to the best matching valid_value string (or null).
-Do not invent values. Only choose from the provided valid_values lists."""
-
-    msg = client.messages.create(
-        model='claude-sonnet-4-6',
-        max_tokens=1024,
-        messages=[{'role': 'user', 'content': prompt}]
-    )
-    text = msg.content[0].text.strip()
-    if text.startswith('```'):
-        text = text.split('\n', 1)[1].rsplit('```', 1)[0]
-    return json.loads(text)
+with open('/tmp/nf_agent/normalized_annotations.json', 'w') as f:
+    json.dump(normalized, f, indent=2)
 ```
 
 #### Step D — Apply annotations to File entities, then validate
@@ -1175,64 +1154,57 @@ After creating each dataset folder and its File entities, bind the appropriate N
 
 **Repository:** https://github.com/nf-osi/nf-metadata-dictionary (latest: v10.5.3)
 
-### Assay → Schema URI Mapping
+### Schema Selection — Dynamic, Not Hardcoded
 
-| Assay (from scoring) | Schema URI |
-|----------------------|-----------|
-| scrnaSeq | `org.synapse.nf-scrnaseqtemplate` |
-| rnaSeq | `org.synapse.nf-rnaseqtemplate` |
-| wholeGenomeSeq | `org.synapse.nf-wgstemplate` |
-| wholeExomeSeq | `org.synapse.nf-westemplate` |
-| ChIPSeq | `org.synapse.nf-chipseqtemplate` |
-| ATACSeq | `org.synapse.nf-atacseqtemplate` |
-| LC-MS / proteomics | `org.synapse.nf-massspectemplate` |
-| metabolomics | `org.synapse.nf-metabolomicstemplate` |
-| miRNASeq | `org.synapse.nf-mirnaseqtemplate` |
-| SNPArray / geneExpressionArray | `org.synapse.nf-genomicsarraytemplate` |
-| flowCytometry | `org.synapse.nf-flowcytometrytemplate` |
-| imaging / microscopy | `org.synapse.nf-imagingassaytemplate` |
-| other / unknown | `org.synapse.nf-bulksequencingassaytemplate` |
+Do not hardcode a static assay→schema map with a fixed fallback. Instead:
 
-If an assay doesn't match any known template, fall back to `org.synapse.nf-bulksequencingassaytemplate`.
+1. **Fetch the full list of available NF templates** from the metadata dictionary repo:
+```python
+import httpx
+
+resp = httpx.get(
+    'https://api.github.com/repos/nf-osi/nf-metadata-dictionary/contents/registered-json-schemas',
+    timeout=15
+)
+available_templates = [f['name'].replace('.json', '') for f in resp.json() if f['name'].endswith('.json')]
+# e.g. ['BulkSequencingAssayTemplate', 'ChIPSeqTemplate', 'FlowCytometryTemplate',
+#        'ImagingAssayTemplate', 'MassSpecAssayTemplate', 'RNASeqTemplate',
+#        'ScRNASeqTemplate', 'WESTemplate', 'WGSTemplate', ...]
+```
+
+2. **You (the agent) pick the best-matching template** by reasoning about the dataset — assay type, data modality, file types, what the paper describes. Read the template names, understand what each covers, and select the one that fits. This is a reasoning task, not a lookup.
+
+3. **Convert the chosen template name to a schema URI**: lowercase the template name and prepend `org.synapse.nf-`:
+```python
+# e.g. 'ScRNASeqTemplate' → 'org.synapse.nf-scrnaseqtemplate'
+schema_uri = 'org.synapse.nf-' + template_name.lower().replace('template', 'template')
+```
+
+4. **Verify the schema exists** before binding by attempting a GET on it. If the URI 404s, try the next-best template.
+
+There is no hardcoded fallback. If no template fits well, pick the one whose name most closely describes the data modality (e.g. clinical pharmacology data → look for a clinical or assay-agnostic template; imaging → `ImagingAssayTemplate`). Use your judgment.
 
 ### Python Pattern
 
 ```python
-import time
+import time, httpx
 
-def bind_nf_schema(syn, dataset_folder_id: str, assay_types: list[str]) -> dict:
-    """Bind the appropriate NF metadata schema to a dataset folder and validate."""
-
-    ASSAY_SCHEMA_MAP = {
-        'scrnaSeq':            'org.synapse.nf-scrnaseqtemplate',
-        'rnaSeq':              'org.synapse.nf-rnaseqtemplate',
-        'wholeGenomeSeq':      'org.synapse.nf-wgstemplate',
-        'wholeExomeSeq':       'org.synapse.nf-westemplate',
-        'ChIPSeq':             'org.synapse.nf-chipseqtemplate',
-        'ATACSeq':             'org.synapse.nf-atacseqtemplate',
-        'LC-MS':               'org.synapse.nf-massspectemplate',
-        'metabolomics':        'org.synapse.nf-metabolomicstemplate',
-        'miRNASeq':            'org.synapse.nf-mirnaseqtemplate',
-        'SNPArray':            'org.synapse.nf-genomicsarraytemplate',
-        'geneExpressionArray': 'org.synapse.nf-genomicsarraytemplate',
-        'flowCytometry':       'org.synapse.nf-flowcytometrytemplate',
-        'imaging':             'org.synapse.nf-imagingassaytemplate',
-    }
-    FALLBACK_SCHEMA = 'org.synapse.nf-bulksequencingassaytemplate'
-
-    # Pick schema for first recognized assay type
-    schema_uri = FALLBACK_SCHEMA
-    for assay in assay_types:
-        if assay in ASSAY_SCHEMA_MAP:
-            schema_uri = ASSAY_SCHEMA_MAP[assay]
-            break
-
+def bind_nf_schema(syn, dataset_folder_id: str, schema_uri: str) -> dict:
+    """Bind a chosen NF metadata schema to a dataset folder and validate.
+    The caller (agent reasoning) selects schema_uri — not this function."""
     try:
+        # Verify schema exists
+        check = httpx.get(
+            f'https://repo-prod.prod.sagebase.org/repo/v1/schema/type/registered/{schema_uri}',
+            timeout=10
+        )
+        if check.status_code != 200:
+            raise ValueError(f"Schema {schema_uri} not found (HTTP {check.status_code})")
+
         js = syn.service("json_schema")
         js.bind_json_schema(schema_uri, dataset_folder_id)
         time.sleep(3)  # allow derived annotations to propagate (async)
 
-        # Validate annotations against schema
         validation = js.validate(dataset_folder_id)
         return {
             'schema_uri': schema_uri,
