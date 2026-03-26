@@ -470,53 +470,91 @@ Each repository accession becomes a **Synapse Dataset entity** (not a plain fold
     └── wiki: abstract, authors, DOI, PMID
 ```
 
-### Creating Synapse Dataset entities
+### Creating Synapse Dataset entities — Required Step
 
-Use `synapseclient.Dataset` for each accession container. If not available in the installed version, fall back to `Folder` with `contentType=dataset` annotation.
+**A `Dataset` entity (`org.sagebionetworks.repo.model.table.Dataset`) must be explicitly created for each accession.** Do not substitute a plain `Folder` — the Dataset entity is what appears in the NF Portal's datasets view and enables portal discovery.
 
-```python
-try:
-    from synapseclient import Dataset
-    dataset_entity = syn.store(Dataset(
-        name=f"{repository}_{accession_id}",
-        parentId=raw_folder_id,
-    ))
-except (ImportError, AttributeError):
-    # Fallback for older synapseclient versions
-    from synapseclient import Folder
-    dataset_entity = syn.store(Folder(
-        name=f"{repository}_{accession_id}",
-        parentId=raw_folder_id,
-    ))
+Files cannot be children of a Dataset entity. The structure for each accession is:
 
-dataset_id = dataset_entity.id
-
-# Annotate the Dataset
-entity = syn.get(dataset_id)
-entity.annotations.update({
-    'contentType': 'dataset',
-    'externalAccessionID': accession_id,
-    'externalRepository': repository,
-    'accessType': access_type,
-    'assay': assay,
-    'species': species,
-    'resourceStatus': 'pendingReview',
-    ...
-})
-syn.store(entity)
+```
+Raw Data/
+├── {Repo}_{AccessionID}/          ← Folder (holds the actual File entities)
+│   ├── file1.fastq.gz             ← File (externalURL)
+│   └── file2.fastq.gz             ← File (externalURL)
+└── {Repo}_{AccessionID}           ← Dataset entity (references the files above)
 ```
 
-Then create individual `File` entities with `externalURL` inside the Dataset:
+#### Step 1 — Create the files folder and populate it
 
 ```python
-from synapseclient import File
+from synapseclient import Folder, File
 
-file_entity = syn.store(File(
-    name=filename,
-    parentId=dataset_id,
-    synapseStore=False,
-    externalURL=direct_download_url,
+files_folder = syn.store(Folder(
+    name=f"{repository}_{accession_id}_files",
+    parentId=raw_folder_id,
 ))
+
+# Create File entities inside the folder
+for filename, download_url in file_list:
+    syn.store(File(
+        name=filename,
+        parentId=files_folder.id,
+        synapseStore=False,
+        path=download_url,   # use path= not externalURL= in synapseclient v4.x
+    ))
+```
+
+#### Step 2 — Create the Dataset entity and link the files
+
+```python
+import json
+
+# Create the Dataset entity via REST API
+dataset_body = {
+    'name': f"{repository}_{accession_id}",
+    'parentId': raw_folder_id,
+    'concreteType': 'org.sagebionetworks.repo.model.table.Dataset',
+}
+dataset = syn.restPOST('/entity', json.dumps(dataset_body))
+dataset_id = dataset['id']
+
+# Add files as dataset items (fetch current entity to get etag, then update)
+dataset_body = syn.restGET(f'/entity/{dataset_id}')
+file_items = []
+for child in syn.getChildren(files_folder.id, includeTypes=['file']):
+    file_entity = syn.get(child['id'], downloadFile=False)
+    file_items.append({
+        'entityId': child['id'],
+        'versionNumber': file_entity.properties.get('versionNumber', 1)
+    })
+dataset_body['items'] = file_items
+syn.restPUT(f'/entity/{dataset_id}', json.dumps(dataset_body))
+```
+
+#### Step 3 — Annotate the Dataset entity
+
+```python
+# Fetch current annotations to get the etag (required for update)
+ann = syn.restGET(f'/entity/{dataset_id}/annotations2')
+ann['annotations'] = {
+    'contentType':         {'type': 'STRING', 'value': ['dataset']},
+    'externalAccessionID': {'type': 'STRING', 'value': [accession_id]},
+    'externalRepository':  {'type': 'STRING', 'value': [repository]},
+    'resourceStatus':      {'type': 'STRING', 'value': ['pendingReview']},
+    'study':               {'type': 'STRING', 'value': [project_name]},
+    # Add any other schema fields with valid enum values here
+}
+syn.restPUT(f'/entity/{dataset_id}/annotations2', json.dumps(ann))
+```
+
+#### Step 4 — Bind NF schema to the Dataset entity and validate
+
+```python
+import time
+js = syn.service('json_schema')
+js.bind_json_schema(schema_uri, dataset_id)
+time.sleep(3)
+validation = js.validate(dataset_id)
 ```
 
 ### GEO + SRA: always enumerate individual SRA runs
