@@ -14,20 +14,20 @@ These Synapse tables are the live NF Data Portal. You may query them with SELECT
 - `syn16858331` — files table
 - `syn16859580` — datasets table
 
-**Rule 2 — Only write to entities you created in the current run, or to the agent's own state tables.**
-Your write scope: (a) new Synapse projects with `EXT_` prefix names that you create this run, and (b) the two state tables under `STATE_PROJECT_ID`. Any other Synapse entity ID in a `syn.store()` call is a bug.
+**Rule 2 — Only write to entities you created in the current run, or to the agent's own state tables, or when explicitly adding a dataset to an existing agent-created project (status = synapse_created or pending_dataset_add).**
+Your write scope: (a) new Synapse projects you create this run, (b) the two state tables under `STATE_PROJECT_ID`, (c) adding new dataset folders to existing projects that the agent itself previously created (identified by `synapse_project_id` in the state table).
 
 **Rule 3 — Never change `resourceStatus` on existing projects.**
-You only ever set `resourceStatus = pendingReview` on new projects you create. Transitions to `approved` or `rejected` are made by human data managers.
+You only ever set `resourceStatus = pendingReview` on new projects or datasets you create/add. Transitions to `approved` or `rejected` are made by human data managers.
 
 **Rule 4 — Do not modify CLAUDE.md, files in `lib/`, or files in `config/`.**
-These are stable infrastructure. Write all generated scripts to `/tmp/nf_agent/` and execute them there.
+Write all generated scripts to `/tmp/nf_agent/` and execute them there.
 
 **Rule 5 — On connector errors, log and continue.**
-If a repository API returns an error or empty results, record the failure and move to the next repository. Do not abort the entire run. Retry at most 3 times with exponential backoff before moving on.
+If a repository API returns an error or empty results, record the failure and move to the next repository. Retry at most 3 times with exponential backoff before moving on.
 
-**Rule 6 — Maximum 50 new Synapse projects per run.**
-Stop creating projects if the counter reaches 50. Log a warning and finish the run normally.
+**Rule 6 — Maximum 50 Synapse write operations (new projects + dataset additions) per run.**
+Stop when the counter reaches 50.
 
 **Rule 7 — Log all JIRA tickets to the run log before the job exits.**
 
@@ -37,7 +37,7 @@ Stop creating projects if the counter reaches 50. Log a warning and finish the r
 
 | Variable | Purpose |
 |----------|---------|
-| `SYNAPSE_AUTH_TOKEN` | Authenticates the nf-bot service account. Scoped write access — can only write to projects it created. |
+| `SYNAPSE_AUTH_TOKEN` | Authenticates the nf-bot service account. Scoped write access. |
 | `ANTHROPIC_API_KEY` | Claude API for relevance scoring (use `claude-sonnet-4-6`) |
 | `NCBI_API_KEY` | Increases NCBI Entrez rate limit from 3 to 10 req/s |
 | `JIRA_BASE_URL` | e.g. `https://sagebionetworks.jira.com` |
@@ -52,8 +52,8 @@ Stop creating projects if the counter reaches 50. Log a warning and finish the r
 Always use `lib/synapse_login.py` to authenticate:
 
 ```python
-import sys
-sys.path.insert(0, '/path/to/repo/lib')
+import sys, os
+sys.path.insert(0, os.environ.get('AGENT_REPO_ROOT', '.') + '/lib')
 from synapse_login import get_synapse_client
 syn = get_synapse_client()
 ```
@@ -62,7 +62,7 @@ syn = get_synapse_client()
 
 ## Agent State Tables
 
-These tables live in the `STATE_PROJECT_ID` Synapse project. Use `lib/state_bootstrap.py` to get their IDs (creates them on first run):
+Use `lib/state_bootstrap.py` to get or create state table IDs:
 
 ```python
 from state_bootstrap import get_or_create_state_tables
@@ -79,12 +79,12 @@ tables = get_or_create_state_tables(syn, os.environ['STATE_PROJECT_ID'])
 | pmid | STRING(32) | PubMed ID if available |
 | source_repo | STRING(64) | e.g. GEO, Zenodo |
 | run_date | DATE | Date processed |
-| synapse_project_id | STRING(32) | Set when project created |
+| synapse_project_id | STRING(32) | Synapse project this accession belongs to |
 | status | STRING(64) | See status values below |
 | relevance_score | DOUBLE | Claude score 0.0–1.0 |
 | disease_focus | STRING(256) | Comma-separated e.g. "NF1, NF2" |
 
-Status values: `discovered`, `rejected_relevance`, `rejected_duplicate`, `synapse_created`, `approved`, `error`
+Status values: `discovered`, `rejected_relevance`, `rejected_duplicate`, `synapse_created`, `dataset_added`, `approved`, `error`
 
 ### `NF_DataContributor_RunLog` schema
 | Column | Type |
@@ -92,7 +92,8 @@ Status values: `discovered`, `rejected_relevance`, `rejected_duplicate`, `synaps
 | run_id | STRING(64) |
 | run_date | DATE |
 | studies_found | INTEGER |
-| studies_created | INTEGER |
+| projects_created | INTEGER |
+| datasets_added | INTEGER |
 | studies_skipped | INTEGER |
 | errors | INTEGER |
 
@@ -130,9 +131,128 @@ SMARCB1, neurofibromin, merlin NF
 
 ---
 
+## Publication-Level Grouping
+
+**Projects are created at the publication/study level, not the repository accession level.**
+
+A single paper may deposit data in multiple repositories (e.g., raw reads in SRA, processed expression in GEO, proteomics in PRIDE). All datasets from the same publication belong in one Synapse project. Use the following signals to group candidates together:
+
+1. **Shared PMID** — strongest signal. Any two candidates with the same PMID are from the same publication.
+2. **Shared DOI** — strong signal for preprints and multi-accession deposits.
+3. **Fuzzy title match across candidates** — if two candidates from different repositories have very similar titles (cosine similarity ≥ 0.85), treat them as the same publication.
+4. **Cross-reference lookup** — for GEO accessions, fetch the linked PMID via Entrez. For SRA, fetch the parent BioProject and check its linked publications. For Zenodo/Figshare, the DOI record often references the paper DOI.
+
+### Publication group schema (internal, saved to `/tmp/nf_agent/publication_groups.json`):
+```json
+{
+  "pub_group_id": "pmid_12345678",
+  "publication_title": "Gene expression profiling of NF1 MPNSTs",
+  "pmid": "12345678",
+  "doi": "10.1234/example",
+  "datasets": [
+    {"accession_id": "GSE301187", "source_repository": "GEO", "data_url": "..."},
+    {"accession_id": "SRP123456", "source_repository": "SRA", "data_url": "..."}
+  ],
+  "relevance_result": { ... }
+}
+```
+
+For candidates with no PMID/DOI and no title match to others, each becomes its own single-dataset publication group.
+
+---
+
+## Deduplication — Three Outcomes
+
+Before creating or modifying any Synapse project, classify each **publication group** into exactly one of three outcomes:
+
+### 1. SKIP — True duplicate
+The publication is already fully represented in the portal. All of:
+- A portal study exists matching by PMID, DOI, or high-confidence fuzzy title (≥ 0.90)
+- The specific dataset accession(s) are already present in `syn16858331` (files table)
+
+Action: log as `rejected_duplicate`, do nothing.
+
+### 2. ADD — Partial match (new dataset for existing study)
+The publication already exists in the portal OR in the agent's own state table, BUT at least one dataset accession from this publication group is NOT yet present. This means we received the data from a different source, or it was deposited in an additional repository after initial ingestion.
+
+Two sub-cases:
+- **Portal study exists** (found in `syn52694652`): Look up the `studyId` column to find the Synapse project ID. Add new dataset folder(s) to that existing project's `Raw Data/` folder.
+- **Agent-created project exists** (found in agent state table with `synapse_project_id` set): Add the new dataset folder to that project.
+
+Action: add new dataset subfolder(s) to the existing project. Log each added accession as `dataset_added`.
+
+### 3. NEW — No match found
+No portal study and no agent state entry matches this publication group by PMID, DOI, or fuzzy title.
+
+Action: create a new Synapse project. Log as `synapse_created`.
+
+### Matching logic (execute in order, stop at first match):
+
+```python
+def classify_publication_group(group, portal_studies_df, portal_files_df, agent_state_set):
+    # agent_state_set: set of (accession_id, synapse_project_id) tuples from processed_studies table
+
+    # 1. Check agent state by accession
+    known_accessions = {acc for acc, _ in agent_state_set}
+    new_accessions = [d for d in group['datasets'] if d['accession_id'] not in known_accessions]
+    if not new_accessions:
+        return 'SKIP', None  # all accessions already processed
+
+    # 2. Match by PMID (exact)
+    if group.get('pmid'):
+        portal_match = portal_studies_df[portal_studies_df['pmid'] == group['pmid']]
+        if not portal_match.empty:
+            return classify_add_or_skip(portal_match, group, portal_files_df)
+
+    # 3. Match by DOI (exact, case-insensitive)
+    if group.get('doi'):
+        portal_match = portal_studies_df[
+            portal_studies_df['doi'].str.lower() == group['doi'].lower()
+        ]
+        if not portal_match.empty:
+            return classify_add_or_skip(portal_match, group, portal_files_df)
+
+    # 4. Match by accession ID in portal files table
+    for dataset in group['datasets']:
+        portal_match = portal_files_df[
+            portal_files_df['externalAccessionID'] == dataset['accession_id']
+        ]
+        if not portal_match.empty:
+            return classify_add_or_skip(portal_match, group, portal_files_df)
+
+    # 5. Fuzzy title match (TF-IDF cosine similarity)
+    # Use publication_title against all portal study names
+    # If similarity >= 0.85: treat as match (ADD or SKIP)
+    # If 0.70-0.84: flag for manual review but treat as NEW (log the near-match)
+    # If < 0.70: NEW
+    similarity = compute_tfidf_similarity(group['publication_title'], portal_studies_df['name'])
+    if similarity >= 0.85:
+        portal_match = portal_studies_df.iloc[[similarity.argmax()]]
+        return classify_add_or_skip(portal_match, group, portal_files_df)
+
+    return 'NEW', None
+
+def classify_add_or_skip(portal_match, group, portal_files_df):
+    # Check which accessions from this group are already in the portal files table
+    portal_project_id = portal_match.iloc[0].get('studyId')
+    known_in_portal = set(portal_files_df['externalAccessionID'].dropna())
+    new_accessions = [d for d in group['datasets'] if d['accession_id'] not in known_in_portal]
+    if new_accessions:
+        return 'ADD', {'project_id': portal_project_id, 'new_datasets': new_accessions}
+    return 'SKIP', None
+```
+
+**Important:** When querying portal tables for matching, fetch these columns:
+- From `syn52694652`: `study`, `studyId`, `pmid`, `doi` (use whatever column names exist — query `LIMIT 1` first to inspect available columns)
+- From `syn16858331`: `externalAccessionID`, `studyId` (or equivalent file-to-study link)
+
+Inspect actual column names before writing dedup queries — portal schema may differ from these examples.
+
+---
+
 ## Relevance Scoring with Claude API
 
-For each candidate, call `claude-sonnet-4-6` with this prompt structure. Expect a JSON response:
+Score at the **publication group level**, not per-accession. Use the publication title + abstract (from PubMed if PMID is available, otherwise from the richest candidate's abstract):
 
 ```python
 import anthropic, json, os
@@ -143,16 +263,15 @@ message = client.messages.create(
     model="claude-sonnet-4-6",
     max_tokens=1024,
     system="""You are an expert biomedical curator for the NF Data Portal.
-Assess whether a dataset is relevant to NF1, NF2, schwannomatosis, or related
-conditions. Respond with valid JSON only.""",
+Assess whether a publication's datasets are relevant to NF1, NF2, schwannomatosis,
+or related conditions. Respond with valid JSON only.""",
     messages=[{
         "role": "user",
-        "content": f"""Evaluate this dataset:
+        "content": f"""Evaluate this publication and its associated datasets:
 
-Title: {title}
+Publication Title: {publication_title}
 Abstract: {abstract[:3000]}
-Repository: {repository}
-Accession: {accession_id}
+Repositories / Accessions: {', '.join(f"{d['source_repository']}:{d['accession_id']}" for d in datasets)}
 
 Return JSON with exactly these fields:
 {{
@@ -163,7 +282,7 @@ Return JSON with exactly these fields:
   "tissue_types": <list e.g. ["neurofibroma","schwannoma"]>,
   "is_primary_data": <bool>,
   "access_notes": <string>,
-  "suggested_study_name": <string following NF Portal conventions>
+  "suggested_project_name": <string — clean publication title for Synapse project name, max 100 chars>
 }}"""
     }]
 )
@@ -181,43 +300,59 @@ result = json.loads(message.content[0].text)
 ## Synapse Project Structure
 
 ### Project Name
-```
-EXT_{Repository}_{AccessionID}
-```
-Examples: `EXT_GEO_GSE123456`, `EXT_Zenodo_10.5281_zenodo.1234`
+Use the **publication title** (cleaned, max 100 characters) as the project name. This is `suggested_project_name` from the Claude scoring response. Do not use accession IDs in the project name.
 
-Replace `/` with `_` in accession IDs.
+Examples:
+- `Gene Expression Profiling of MPNSTs in Patients with NF1`
+- `Single-cell RNA-seq of NF1-associated High-Grade Glioma`
 
-### Folder Hierarchy
+If a publication title is not available (no PMID, no paper), fall back to a descriptive name based on the dataset title.
+
+### Folder Hierarchy — Multiple Datasets Per Project
 ```
-EXT_{Repository}_{AccessionID}/
+{Publication Title}/
 ├── Raw Data/
-│   └── {Repository}_{AccessionID}/    ← dataset subfolder (contentType=dataset)
-│       └── Source: {accession_id}     ← ExternalLink to data_url
+│   ├── GEO_{AccessionID}/          ← one subfolder per repository accession
+│   │   └── Source: {accession_id}  ← ExternalLink → data_url
+│   ├── SRA_{AccessionID}/          ← additional dataset from same paper
+│   │   └── Source: {accession_id}
+│   └── PRIDE_{AccessionID}/        ← proteomics from same paper
+│       └── Source: {accession_id}
 ├── Analysis/
 └── Source Metadata/
-    └── original_metadata (wiki)
+    └── Publication metadata (wiki with abstract, authors, DOI, PMID)
 ```
 
-### Required Annotations (apply to project AND pointer entities)
+Each dataset subfolder is annotated with the accession-specific metadata (assay, file format, etc.). The project itself is annotated with publication-level metadata.
 
+### Required Annotations
+
+**Project-level** (apply to the Synapse project):
 | Key | Value |
 |-----|-------|
-| study | {suggested_study_name from Claude} |
+| study | {suggested_project_name} |
 | resourceType | experimentalData |
 | resourceStatus | pendingReview |
 | fundingAgency | Not Applicable (External Study) |
-| accessType | open \| controlled |
+| pmid | {pmid if available} |
+| doi | {doi if available} |
+
+**Dataset folder level** (apply to each `{Repo}_{AccessionID}/` subfolder):
+| Key | Value |
+|-----|-------|
+| study | {suggested_project_name} |
+| contentType | dataset |
 | externalAccessionID | {accession_id} |
 | externalRepository | {source_repository} |
-| dataType | Genomic \| Proteomic \| Metabolomic \| Other |
-| dataSubtype | raw |
-| assay | {from Claude, normalized — see vocab below} |
+| accessType | open \| controlled |
+| assay | {from Claude, normalized} |
 | species | {from Claude, normalized} |
 | tumorType | {from Claude} |
-| diagnosis | {from Claude, e.g. "Neurofibromatosis 1"} |
+| diagnosis | {from Claude} |
+| dataType | Genomic \| Proteomic \| Metabolomic \| Other |
+| dataSubtype | raw |
 | fileFormat | {from repository metadata} |
-| contentType | dataset (on dataset folders) |
+| resourceStatus | pendingReview |
 
 ### Assay Vocabulary Normalization
 
@@ -236,58 +371,30 @@ EXT_{Repository}_{AccessionID}/
 | mirna, mirna-seq | miRNASeq |
 | snp array, snp | SNPArray |
 
-### Synapse Project Creation Pattern
+### Adding a Dataset to an Existing Project (ADD outcome)
+
+When dedup returns ADD, find the existing project's `Raw Data` folder and add new subfolder(s) there:
 
 ```python
-import synapseclient
-from synapseclient import Project, Folder, Wiki, Activity
+# Find Raw Data folder in existing project
+children = list(syn.getChildren(existing_project_id, includeTypes=['folder']))
+raw_data_folder = next((c for c in children if c.get('name') == 'Raw Data'), None)
 
-project = syn.store(Project(name=project_name))
-project_id = project.id
-
-# Annotate project
-entity = syn.get(project_id)
-entity.annotations.update(project_annotations)
-syn.store(entity)
-
-# Create folders
-raw_folder = syn.store(Folder(name='Raw Data', parentId=project_id))
-analysis_folder = syn.store(Folder(name='Analysis', parentId=project_id))
-metadata_folder = syn.store(Folder(name='Source Metadata', parentId=project_id))
-
-# Create dataset subfolder
-dataset_folder = syn.store(Folder(
-    name=f'{repository}_{accession_id}',
-    parentId=raw_folder.id
-))
-dataset_folder_annotations = {'contentType': 'dataset', ...}
-
-# ExternalLink for data URL
-from synapseclient import Link
-link = syn.store(Link(
-    targetId=data_url,
-    name=f'Source: {accession_id}',
-    parentId=dataset_folder.id
-))
-
-# Provenance
-activity = Activity(
-    name='NF Data Contributor Agent — auto-discovery',
-    description=f'Discovered from {repository}. Metadata extracted by claude-sonnet-4-6.',
-    used=[data_url]
-)
-syn.setProvenance(link.id, activity)
-
-# Wiki
-wiki = Wiki(title='Study Overview', owner=project_id, markdown=wiki_content)
-syn.store(wiki)
+if raw_data_folder:
+    raw_folder_id = raw_data_folder.get('id')
+    # Add new dataset subfolder
+    new_folder = syn.store(Folder(
+        name=f'{repository}_{accession_id}',
+        parentId=raw_folder_id
+    ))
+    # Annotate and add ExternalLink as usual
 ```
+
+If the existing project has a different folder structure (it's a portal-managed project, not agent-created), **do not attempt to write to it** — log a note that a data manager should manually link the dataset, and create a JIRA ticket flagged as "manual action required."
 
 ---
 
 ## JIRA Notification Pattern
-
-For each new project created, open a JIRA ticket:
 
 ```python
 import httpx, os
@@ -298,53 +405,40 @@ token = os.environ.get('JIRA_API_TOKEN', '')
 
 if base_url and email and token:
     synapse_url = f'https://www.synapse.org/#!Synapse:{synapse_project_id}'
+
+    # For NEW projects:
+    summary = f'Review auto-discovered study: {project_name}'
+
+    # For ADD (dataset added to existing project):
+    summary = f'New dataset linked to existing study: {project_name} — {repository}:{accession_id}'
+
+    # For ADD (manual action required — portal project, can't auto-write):
+    summary = f'[Manual] Link external dataset to portal study: {project_name} — {repository}:{accession_id}'
+
     payload = {
         'fields': {
             'project': {'key': 'NFOSI'},
-            'summary': f'Review auto-discovered study: {study_name} ({repository}:{accession_id})',
-            'description': {
-                'type': 'doc', 'version': 1,
-                'content': [{'type': 'paragraph', 'content': [{'type': 'text',
-                    'text': f'New external dataset pending review.\n\n'
-                            f'Repository: {repository}\nAccession: {accession_id}\n'
-                            f'Relevance: {relevance_score:.2f}\nDisease: {disease_focus}\n'
-                            f'Synapse: {synapse_url}'}]}]
-            },
+            'summary': summary[:254],
+            'description': { ... },
             'issuetype': {'name': 'Task'},
         }
     }
-    resp = httpx.post(
-        f'{base_url}/rest/api/3/issue',
-        json=payload,
-        auth=(email, token)
-    )
+    resp = httpx.post(f'{base_url}/rest/api/3/issue', json=payload, auth=(email, token))
     resp.raise_for_status()
 ```
 
 ---
 
-## Deduplication Logic
-
-Before creating any project, check in this order (stop at first match):
-
-1. **Own tracking table**: `SELECT accession_id FROM {processed_table_id}` — load all into a Python set at the start of the run. Skip any candidate whose accession is in this set.
-2. **Portal study table accession**: `SELECT study FROM syn52694652` — check if accession_id appears.
-3. **Portal DOI**: Query portal tables for matching DOI.
-4. **Portal PMID**: Query portal tables for matching PMID.
-5. **Fuzzy title match**: Use TF-IDF cosine similarity (scikit-learn) against all portal study titles. Threshold: 0.85. Flag for manual review rather than hard-reject.
-
----
-
 ## Wiki Template
 
-Use this for the project wiki page (fill in all placeholders):
+Use this for the project wiki page:
 
 ```markdown
-## Auto-Discovered External Dataset
+## Auto-Discovered External Study
 
-**Source Repository:** {repository}
-**Accession ID:** {accession_id}
-**Data URL:** {data_url}
+**Publication Title:** {publication_title}
+**PMID:** {pmid or 'Not available'}
+**DOI:** {doi or 'Not available'}
 
 ---
 
@@ -353,13 +447,10 @@ Use this for the project wiki page (fill in all placeholders):
 
 ---
 
-### Dataset Details
-| Field | Value |
-|-------|-------|
-| Data Types | {data_types} |
-| Access Type | {access_type} |
-| Sample Count | {sample_count} |
-| Discovery Date | {today} |
+### Datasets Included
+| Repository | Accession | Data Types | Access |
+|-----------|-----------|-----------|--------|
+| {repo} | {accession} | {data_types} | {access_type} |
 
 ---
 
@@ -374,7 +465,7 @@ Use this for the project wiki page (fill in all placeholders):
 
 ---
 
-> **Note:** Created automatically by the NF Data Contributor Agent.
+> **Note:** Created automatically by the NF Data Contributor Agent (discovery date: {today}).
 > Status: **pending data manager review**.
 > Metadata extracted by `claude-sonnet-4-6`.
 ```

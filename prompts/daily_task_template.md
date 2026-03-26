@@ -7,38 +7,34 @@
 
 ## Your Task
 
-Run the full NF dataset discovery pipeline for today. Work through each step below in order. Write Python scripts to `/tmp/nf_agent/` and execute them. Use the context in CLAUDE.md for all reference information (APIs, auth patterns, annotation schemas, safety rules).
+Run the full NF dataset discovery pipeline. Write Python scripts to `/tmp/nf_agent/` and execute them. Refer to CLAUDE.md for all reference information (APIs, auth, annotation schemas, safety rules, dedup logic).
 
 ---
 
 ## Step 1 — Setup
 
+Install dependencies and authenticate:
 ```
 mkdir -p /tmp/nf_agent
 pip install synapseclient httpx biopython pyyaml scikit-learn anthropic --quiet
 ```
 
-Then write and run a setup script that:
-1. Authenticates with Synapse using `lib/synapse_login.py`
-2. Calls `lib/state_bootstrap.py` to get (or create) the state table IDs
-3. Loads all previously processed accession IDs from `NF_DataContributor_ProcessedStudies` into a Python set — this is your primary deduplication guard
-4. Prints the count of previously processed accessions
-
-Save the table IDs and accession set to files in `/tmp/nf_agent/` so subsequent scripts can read them without re-querying Synapse.
+Write and run `/tmp/nf_agent/setup.py`:
+1. Authenticate with Synapse via `lib/synapse_login.py` — print the logged-in username
+2. Call `lib/state_bootstrap.py` to get or create state table IDs (if `STATE_PROJECT_ID` env var is empty, create a Synapse project named "NF DataContributor Agent State" and use that)
+3. Load all previously processed accession IDs from `NF_DataContributor_ProcessedStudies` into a set
+4. Save table IDs, the accession set, and the state project ID to `/tmp/nf_agent/state.json`
+5. Print: "Setup complete. Previously processed: N accessions"
 
 ---
 
 ## Step 2 — Discover Candidates
 
-Write and run a discovery script for **each repository** in the list below. For each repository:
-- Query for datasets matching the NF/SWN search terms published since {{LOOKBACK_DATE}}
-- Collect results into a standardized JSON format (see schema below)
-- Save results to `/tmp/nf_agent/{repo_name}_candidates.json`
-- Print: `{repo_name}: found N candidates`
+Write and run one script per repository. For each, search for NF/SWN terms published since {{LOOKBACK_DATE}}, fetch up to 10 results, and save to `/tmp/nf_agent/{repo}_candidates.json` using the standard candidate schema from CLAUDE.md.
 
-Run repositories in this order (continue on error, log failures):
-1. GEO (via NCBI Entrez, use `NCBI_API_KEY`)
-2. SRA (via NCBI Entrez)
+Run repositories in order (log errors and continue on failure):
+1. GEO — NCBI Entrez, use `NCBI_API_KEY` env var if set
+2. SRA — NCBI Entrez
 3. Zenodo
 4. Figshare
 5. OSF
@@ -48,110 +44,142 @@ Run repositories in this order (continue on error, log failures):
 9. MetaboLights
 10. NCI PDC (GraphQL)
 
-### Candidate JSON Schema
+For each repository, print: `{repo}: found N candidates`
+
+---
+
+## Step 3 — Enrich with Publication Metadata and Group by Publication
+
+Write and run `/tmp/nf_agent/group_by_publication.py`:
+
+1. Load all `*_candidates.json` files, combine into a flat list, deduplicate by accession_id
+2. **Enrich with publication metadata**: For candidates with a PMID, fetch the full PubMed record via Entrez to get the paper title and abstract (often richer than the repository description). For GEO accessions without a PMID, check the GEO record for linked publications.
+3. **Group by publication** using the logic in CLAUDE.md:
+   - Primary key: shared PMID
+   - Secondary key: shared DOI
+   - Tertiary: fuzzy title similarity ≥ 0.85 across candidates
+   - Each candidate with no match becomes its own group
+4. Save publication groups to `/tmp/nf_agent/publication_groups.json`
+5. Print: "N candidates → M publication groups"
+   - Show each group: `[PMID:12345] "Paper Title" — 2 datasets: GEO:GSE123, SRA:SRP456`
+
+---
+
+## Step 4 — Deduplicate Against Portal
+
+Write and run `/tmp/nf_agent/dedup.py`:
+
+1. Load `publication_groups.json` and `state.json`
+2. **Inspect the portal schema first**: query `SELECT * FROM syn52694652 LIMIT 1` and `SELECT * FROM syn16858331 LIMIT 1` to see the actual column names before writing any matching queries
+3. Classify each publication group as NEW, ADD, or SKIP using the three-outcome logic in CLAUDE.md:
+   - Check by PMID (exact match against portal)
+   - Check by DOI (case-insensitive)
+   - Check by accession ID in portal files table
+   - Check by fuzzy title (TF-IDF cosine similarity)
+   - If similarity 0.70–0.84: classify as NEW but log a "near-match warning" with the portal study name
+4. Save results to `/tmp/nf_agent/dedup_results.json`:
+   ```json
+   {
+     "new": [ {publication_group} ],
+     "add": [ {"group": {publication_group}, "existing_project_id": "syn...", "new_datasets": [...]} ],
+     "skip": [ {"group": {publication_group}, "reason": "..."} ],
+     "near_matches": [ {"group": {publication_group}, "portal_study": "...", "similarity": 0.77} ]
+   }
+   ```
+5. Print summary:
+   ```
+   Dedup results: N new, M add-to-existing, K skip, J near-matches flagged
+   ```
+
+---
+
+## Step 5 — Score Relevance
+
+Write and run `/tmp/nf_agent/score.py`:
+
+1. Load `dedup_results.json` — score all groups in `new` and `add` lists
+2. For each publication group, call `claude-sonnet-4-6` using the publication-level scoring prompt in CLAUDE.md (use the PubMed abstract if available, fall back to the richest repository abstract)
+3. Apply filters: relevance ≥ 0.70, is_primary_data = true, sample_count ≥ 3 (if known)
+4. Save to `/tmp/nf_agent/scored.json` with relevance results attached to each group
+5. Print each result:
+   ```
+   [NEW] [APPROVED] "Gene Expression Profiling of NF1 MPNSTs" — score: 0.95 — GEO:GSE301187
+   [ADD] [APPROVED] "NF2 Schwann Cell Proteomics" — score: 0.88 — adding PRIDE:PXD012345 to syn12345
+   [NEW] [REJECTED] "KRAS plasma samples" — score: 0.05 — low relevance
+   ```
+
+---
+
+## Step 6 — Create / Update Synapse Projects
+
+Write and run `/tmp/nf_agent/synapse_actions.py`:
+
+For each approved publication group (stopping at 50 total write operations):
+
+**For NEW groups:**
+1. Create a Synapse project named after the publication title (`suggested_project_name` from Claude)
+2. Create the standard folder hierarchy: `Raw Data/`, `Analysis/`, `Source Metadata/`
+3. For each dataset in the group, create a `{Repository}_{AccessionID}/` subfolder inside `Raw Data/` with an ExternalLink pointer and dataset-level annotations
+4. Apply project-level annotations (study, resourceType, resourceStatus, pmid, doi)
+5. Create provenance on each ExternalLink
+6. Create the wiki page using the template in CLAUDE.md
+7. Print: `Created: "{project_name}" ({project_id}) — {N} datasets`
+
+**For ADD groups:**
+- If the existing project is an agent-created project (found in agent state table): find its `Raw Data/` folder and add the new dataset subfolder(s) following the same pattern
+- If the existing project is a portal-managed project (found only in portal table, no agent state entry): **do not write to it** — create a JIRA ticket flagged "[Manual]" and log as `dataset_added` with a note
+- Print: `Added: {Repository}:{AccessionID} → existing project {project_id}`
+
+Save results to `/tmp/nf_agent/created_projects.json`:
 ```json
-{
-  "title": "string",
-  "abstract": "string (first 3000 chars)",
-  "authors": ["string"],
-  "source_repository": "string",
-  "accession_id": "string",
-  "doi": "string or null",
-  "pmid": "string or null",
-  "publication_date": "YYYY-MM-DD",
-  "data_types": ["string"],
-  "file_formats": ["string"],
-  "sample_count": "integer or null",
-  "access_type": "open | controlled | embargoed",
-  "data_url": "string",
-  "license": "string or null"
-}
+[
+  {"action": "created", "project_id": "syn...", "project_name": "...", "accession_ids": [...]},
+  {"action": "added",   "project_id": "syn...", "project_name": "...", "accession_ids": [...]}
+]
 ```
 
 ---
 
-## Step 3 — Deduplicate
+## Step 7 — Send JIRA Notifications
 
-Write and run a deduplication script that:
-1. Loads all `*_candidates.json` files from `/tmp/nf_agent/`
-2. Deduplicates within the batch (same accession ID from multiple repos = keep one)
-3. Filters out any accession already in the processed-accessions set from Step 1
-4. Queries the portal tables (`syn52694652`) to filter out known accessions, DOIs, and PMIDs (**read-only SELECT only**)
-5. Runs fuzzy title matching (TF-IDF cosine similarity ≥ 0.85) against portal study titles — candidates that match are logged as `rejected_duplicate` and skipped
-6. Saves the surviving candidates to `/tmp/nf_agent/candidates_for_scoring.json`
-7. Prints: `After deduplication: N candidates to score`
+Write and run `/tmp/nf_agent/notify.py`:
 
----
+For each created or updated project:
+- NEW project: `"Review auto-discovered study: {project_name}"`
+- Dataset added to agent project: `"New dataset linked to existing study: {project_name} — {repo}:{accession}"`
+- Dataset requiring manual link to portal project: `"[Manual] Link external dataset to portal study: {project_name} — {repo}:{accession}"`
 
-## Step 4 — Score Relevance
-
-Write and run a scoring script that:
-1. Loads `candidates_for_scoring.json`
-2. For each candidate, calls the Claude API (`claude-sonnet-4-6`) using the scoring prompt in CLAUDE.md
-3. Applies the filters: relevance ≥ 0.70, is_primary_data = true, sample_count ≥ 3 (if known), access_type ∈ {open, controlled}
-4. Saves passing candidates + their scoring results to `/tmp/nf_agent/candidates_approved.json`
-5. Saves rejected candidates with rejection reason to `/tmp/nf_agent/candidates_rejected.json`
-6. Prints: `Scoring complete: N approved, M rejected`
+If JIRA credentials are missing/invalid, log a warning and skip.
+Save ticket results to `/tmp/nf_agent/jira_tickets.json`.
 
 ---
 
-## Step 5 — Create Synapse Projects
+## Step 8 — Update State Tables
 
-Write and run a Synapse creation script that:
-1. Loads `candidates_approved.json`
-2. For each candidate (stopping at 50 total):
-   a. Creates a Synapse project named `EXT_{repository}_{accession_id}`
-   b. Applies all required annotations (project level and entity level) — see CLAUDE.md
-   c. Creates the standard folder hierarchy (`Raw Data`, `Analysis`, `Source Metadata`)
-   d. Creates a dataset subfolder and ExternalLink pointer to `data_url` inside `Raw Data`
-   e. Sets provenance on the ExternalLink
-   f. Creates the wiki page using the template in CLAUDE.md
-3. Saves a results map `{accession_id: synapse_project_id}` to `/tmp/nf_agent/created_projects.json`
-4. Prints each created project: `Created: EXT_{repo}_{acc} -> {project_id}`
+Write and run `/tmp/nf_agent/update_state.py`:
 
----
-
-## Step 6 — Send JIRA Notifications
-
-Write and run a notification script that:
-1. Loads `created_projects.json` and `candidates_approved.json`
-2. For each created project, creates a JIRA ticket using the pattern in CLAUDE.md
-3. If JIRA credentials are not available (env vars missing), logs a warning and skips
-4. Saves `{accession_id: jira_issue_key}` to `/tmp/nf_agent/jira_tickets.json`
-5. Prints each ticket: `JIRA: {issue_key} created for {accession_id}`
-
----
-
-## Step 7 — Update State Tables
-
-Write and run a state update script that:
-1. Loads all result files from `/tmp/nf_agent/`
-2. For every candidate evaluated (approved, rejected, errored), appends a row to `NF_DataContributor_ProcessedStudies`
-3. Appends one row to `NF_DataContributor_RunLog` with today's summary counts
-4. Prints the final run summary:
+1. For every accession evaluated, append a row to `NF_DataContributor_ProcessedStudies`
+2. Append one run summary row to `NF_DataContributor_RunLog`
+3. Print the final run summary:
    ```
    === NF Data Contributor Agent — Run Complete ===
    Date: {{TODAY}}
-   Repositories queried: 10
    Candidates found: N
-   After deduplication: N
+   Publication groups: N
+   Dedup — new: N | add: N | skip: N | near-matches flagged: N
    After relevance scoring: N approved
    Synapse projects created: N
+   Datasets added to existing projects: N
    JIRA tickets created: N
    Errors: N
+   ================================================
    ```
 
 ---
 
 ## Error Handling
 
-- If any individual step script exits with a non-zero code, log the error, continue to the next step if possible, and ensure Step 7 still runs to record what did complete.
-- If Synapse project creation fails for a specific candidate, log it as `status=error` in the state table, skip that candidate, and continue.
-- If the Claude API call fails after 3 retries with exponential backoff, log the candidate as `status=error` and continue.
-- If the JIRA step fails entirely, log a warning but do not fail the run.
-
----
-
-## Done
-
-When all 7 steps are complete, print "Agent run finished successfully." and exit.
+- If any step script exits non-zero, log the error and continue to the next step where possible
+- Always run Step 8 to record what did complete, even after failures
+- If Synapse project creation fails for a specific group, log it as `status=error` and continue
+- If the Claude API fails after 3 retries with exponential backoff, log as `status=error` and continue

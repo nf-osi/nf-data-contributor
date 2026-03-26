@@ -34,7 +34,8 @@ RUN_LOG_COLUMNS: list[Column] = [
     Column(name="run_id",           columnType="STRING",  maximumSize=64),
     Column(name="run_date",         columnType="DATE"),
     Column(name="studies_found",    columnType="INTEGER"),
-    Column(name="studies_created",  columnType="INTEGER"),
+    Column(name="projects_created", columnType="INTEGER"),
+    Column(name="datasets_added",   columnType="INTEGER"),
     Column(name="studies_skipped",  columnType="INTEGER"),
     Column(name="errors",           columnType="INTEGER"),
 ]
