@@ -1,0 +1,6 @@
+synapseclient>=4.0.0
+httpx>=0.27.0
+biopython>=1.83
+PyYAML>=6.0
+scikit-learn>=1.5.0
+anthropic>=0.40.0

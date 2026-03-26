@@ -2,11 +2,8 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
-dist/
-build/
 .venv/
 venv/
-.env
 
 # IDE
 .vscode/
@@ -17,7 +14,11 @@ venv/
 .coverage
 htmlcov/
 
+# Agent scratchpad (never committed)
+/tmp/nf_agent/
+
 # Secrets
 *.pem
 *.key
+.env
 secrets.yaml

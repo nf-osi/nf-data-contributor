@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: '0 2 * * *'   # 2:00 AM UTC daily
   workflow_dispatch:       # Allow manual trigger
+    inputs:
+      lookback_days:
+        description: 'Override lookback window in days (default: 2)'
+        required: false
+        default: '2'
 
 jobs:
   contribute:
@@ -14,24 +19,71 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Set up Node.js (for Claude Code CLI)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: 'pip'
+          cache-dependency-path: lib/requirements.txt
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - name: Install Python dependencies
+        run: pip install -r lib/requirements.txt
+
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Prepare task prompt
+        run: |
+          TODAY=$(date -u +%Y-%m-%d)
+
+          # Determine lookback date
+          LOOKBACK_DAYS="${{ github.event.inputs.lookback_days || '2' }}"
+          LOOKBACK_DATE=$(date -u -d "${LOOKBACK_DAYS} days ago" +%Y-%m-%d 2>/dev/null || \
+                          date -u -v-${LOOKBACK_DAYS}d +%Y-%m-%d)
+
+          mkdir -p /tmp/nf_agent
+
+          # Inject dates into the task template
+          sed \
+            -e "s/{{TODAY}}/${TODAY}/g" \
+            -e "s/{{LOOKBACK_DATE}}/${LOOKBACK_DATE}/g" \
+            prompts/daily_task_template.md > /tmp/nf_agent/daily_task.md
+
+          echo "TODAY=${TODAY}" >> "$GITHUB_ENV"
+          echo "LOOKBACK_DATE=${LOOKBACK_DATE}" >> "$GITHUB_ENV"
+          echo "Task prompt prepared: searching since ${LOOKBACK_DATE}"
 
       - name: Run NF Data Contributor Agent
-        run: python -m src.main
+        run: |
+          claude \
+            --permission-mode permissionless \
+            --output-format stream-json \
+            --no-update-check \
+            --max-turns 80 \
+            -p "$(cat /tmp/nf_agent/daily_task.md)"
         env:
-          SYNAPSE_AUTH_TOKEN: ${{ secrets.SYNAPSE_AUTH_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SYNAPSE_AUTH_TOKEN: ${{ secrets.SYNAPSE_AUTH_TOKEN }}
           NCBI_API_KEY: ${{ secrets.NCBI_API_KEY }}
           JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
           JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          STATE_PROJECT_ID: ${{ vars.STATE_PROJECT_ID }}
+          # Provide repo root so agent scripts can find lib/
+          AGENT_REPO_ROOT: ${{ github.workspace }}
+
+      - name: Upload agent artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-debug-${{ env.TODAY }}
+          path: /tmp/nf_agent/
+          retention-days: 14
 
       - name: Open GitHub Issue on failure
         if: failure()
@@ -39,10 +91,24 @@ jobs:
         with:
           script: |
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const today = process.env.TODAY || new Date().toISOString().slice(0,10);
             await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title: `[Agent Failure] Daily run failed on ${new Date().toISOString().slice(0,10)}`,
-              body: `The NF Data Contributor Agent daily run failed.\n\n**Run:** ${runUrl}\n\nPlease check the run logs and investigate the root cause.`,
+              title: `[Agent Failure] Daily run failed on ${today}`,
+              body: [
+                '## NF Data Contributor Agent — Run Failure',
+                '',
+                `**Date:** ${today}`,
+                `**Run:** ${runUrl}`,
+                '',
+                'The daily run failed. Check the run logs and the uploaded `/tmp/nf_agent/` artifact for debug information.',
+                '',
+                'Common causes:',
+                '- Synapse auth token expired',
+                '- NCBI rate limit exceeded',
+                '- Claude API error',
+                '- `STATE_PROJECT_ID` repo variable not set',
+              ].join('\n'),
               labels: ['agent-failure', 'automated'],
             });

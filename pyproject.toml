@@ -1,20 +1,6 @@
-[build-system]
-requires = ["setuptools>=68"]
-build-backend = "setuptools.backends.legacy:build"
-
-[project]
-name = "nf-data-contributor"
-version = "1.0.0"
-description = "Autonomous agent that discovers and indexes NF/SWN datasets on the NF Data Portal"
-requires-python = ">=3.12"
-
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["src*"]
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-asyncio_mode = "auto"
+pythonpath = ["."]
 
 [tool.pyright]
 pythonVersion = "3.12"
