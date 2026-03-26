@@ -916,22 +916,33 @@ For GEO+SRA specifically: the combined GEO supplementary + SRA FASTQ count can b
 | pmid | {pmid if available} |
 | doi | {doi if available} |
 
-**Dataset folder level** (apply to each `{Repo}_{AccessionID}/` subfolder):
+**File level** (apply to **each individual File entity** inside the dataset folder — this is what appears in the NF Portal files table):
+| Key | Value |
+|-----|-------|
+| study | {suggested_project_name} |
+| externalAccessionID | {accession_id} |
+| externalRepository | {source_repository} |
+| accessType | open \| controlled |
+| assay | {normalized to NF schema enum} |
+| species | {normalized to NF schema enum} |
+| tumorType | {normalized to NF schema enum} |
+| diagnosis | {normalized to NF schema enum} |
+| dataType | Genomic \| Proteomic \| Metabolomic \| Other |
+| dataSubtype | raw |
+| fileFormat | {inferred from file extension, normalized to NF schema enum} |
+| resourceStatus | pendingReview |
+| + any additional fields extracted from source material | |
+
+**Dataset folder level** (apply to the `{Repo}_{AccessionID}/` folder — used for schema binding and Curator Grid):
 | Key | Value |
 |-----|-------|
 | study | {suggested_project_name} |
 | contentType | dataset |
 | externalAccessionID | {accession_id} |
 | externalRepository | {source_repository} |
-| accessType | open \| controlled |
-| assay | {from Claude, normalized} |
-| species | {from Claude, normalized} |
-| tumorType | {from Claude} |
-| diagnosis | {from Claude} |
-| dataType | Genomic \| Proteomic \| Metabolomic \| Other |
-| dataSubtype | raw |
-| fileFormat | {from repository metadata} |
 | resourceStatus | pendingReview |
+
+The NF schema is bound to the dataset **folder** (for Curator Grid validation), but the full annotation set goes on each **File entity** so it appears correctly in portal search and the files table (syn16858331).
 
 ### Annotation Vocabulary — Runtime Schema Query (do NOT hardcode enum values)
 
@@ -979,39 +990,17 @@ enums = fetch_schema_enums('org.synapse.nf-scrnaseqtemplate')
 # enums['diagnosis'] → ['Neurofibromatosis type 1', ...]
 ```
 
-#### Step B — Extract raw metadata from source material
+#### Step B — Extract raw metadata from all available sources
 
-Before normalizing, extract raw values from every available source. The goal is to pre-fill **all** fields that can be inferred — not just the obvious ones.
+Before normalizing, gather raw metadata from everything available for this dataset. The specific sources and field names vary by repository — inspect what you actually get and extract anything that looks relevant to the NF schema fields. Don't assume field names; read the actual response.
 
-**From SRA runinfo CSV** (fetch via `Entrez.efetch(db='sra', id=sra_id, rettype='runinfo')`):
-```
-Column          → NF field
-Platform        → platform (e.g. "ILLUMINA" → look up exact Synapse enum)
-Model           → platform (more specific, e.g. "Illumina NovaSeq 6000")
-LibraryStrategy → assay (e.g. "RNA-Seq", "WGS", "ChIP-Seq")
-LibraryLayout   → libraryStrand clue (PAIRED/SINGLE)
-LibrarySelection→ libraryPreparationMethod clue
-ScientificName  → species
-BioSample       → specimenID
-Run (SRR...)    → individualID clue (or use BioSample)
-```
+General sources to try (adapt based on what the repository provides):
+- **Repository metadata API response**: Fetch the full record for the accession and read all metadata fields. Look for anything describing: organism/species, tissue/cell type, disease/diagnosis, assay method, sequencing platform, library preparation, sample identifiers, sex, age, treatment.
+- **Sample/specimen-level metadata**: Many repositories have a separate sample layer (e.g. GEO has GSM records, SRA has BioSample records, ArrayExpress has sample sheets). Fetch it — it often contains the richest per-specimen details.
+- **Associated publication** (when PMID is available): Use Claude to extract structured metadata from the abstract and, if available, the methods section. Publications often describe specimen preparation, patient cohort, library kits, and platforms even when the repository record omits them.
+- **File names and formats**: Infer `fileFormat` from file extensions in the actual file list (`.fastq.gz` → `fastq`, `.bam` → `bam`, `.mtx` → `mtx`).
 
-**From GEO sample-level SOFT** (fetch via `Entrez.efetch(db='gds', id=gds_id, rettype='soft')`):
-Parse `!Sample_characteristics_ch1` lines from each GSM record — these contain:
-```
-tissue: neurofibroma
-cell type: primary NF1-/- Schwann cells
-treatment: vehicle control
-Sex: male
-individual: Patient-01
-library preparation method: 10x Genomics Chromium
-```
-Also parse `!Sample_molecule_ch1` (RNA/DNA/protein), `!Sample_extract_protocol_ch1` (library prep details).
-
-**From PubMed abstract/methods** (when PMID is available):
-Use Claude to extract from the abstract or full methods section:
-- tissue/tumor type, patient cohort details, specimen preparation (FFPE/frozen/fresh),
-  library kit, sequencing platform, number of individuals vs specimens
+Dump all extracted key-value pairs into a flat `raw_metadata` dict before calling the normalizer. More raw data is always better — Claude will pick what's relevant.
 
 #### Step C — Normalize raw values to schema terms using Claude
 
@@ -1058,24 +1047,28 @@ Do not invent values. Only choose from the provided valid_values lists."""
     return json.loads(text)
 ```
 
-#### Step D — Fill remaining fields from source before marking incomplete
+#### Step D — Apply annotations to File entities, then validate
 
-Many fields flagged as "missing" by schema validation can be inferred:
+After normalizing, apply the full annotation set to **each individual File entity** (not just the folder). Then run schema validation on the folder:
 
-| Schema field | Source |
-|---|---|
-| `platform` | SRA runinfo `Model` column |
-| `libraryPreparationMethod` | SRA `LibrarySelection` + GEO `!Sample_extract_protocol_ch1` |
-| `libraryStrand` | SRA `LibraryLayout` (PAIRED→Unstranded typical; parse protocol for stranded info) |
-| `specimenPreparationMethod` | GEO characteristics: "tissue preservation: FFPE" → `FFPE` |
-| `specimenID` | GEO characteristics: "specimen id: ..." or BioSample accession as fallback |
-| `individualID` | GEO characteristics: "individual: Patient-01" or SRA `Subject_ID` |
-| `sex` | GEO characteristics: "Sex: male" |
-| `age` | GEO characteristics: "age: 34" |
-| `tumorType` | GEO characteristics: "tumor type: ..." + abstract |
-| `diagnosis` | GEO characteristics: "disease: ..." + abstract |
+```python
+# Apply annotations to every File inside the dataset folder
+for child in syn.getChildren(dataset_folder_id, includeTypes=['file']):
+    file_entity = syn.get(child['id'], downloadFile=False)
+    file_entity.annotations.update(normalized_annotations)
+    # Add file-specific fields
+    ext = child['name'].rsplit('.', 1)[-1].lower().replace('gz', '').rstrip('.')
+    file_entity.annotations['fileFormat'] = ext  # e.g. 'fastq', 'bam', 'mtx'
+    syn.store(file_entity)
 
-Store all extracted fields as annotations on the dataset folder. Schema validation will show which ones still need human review — the Curator Grid AI agent (at `https://www.synapse.org/#!Synapse:{project_id}`) can be used by data managers to fill and clean remaining required fields interactively.
+# Bind schema to folder (for Curator Grid) and validate
+js = syn.service('json_schema')
+js.bind_json_schema(schema_uri, dataset_folder_id)
+time.sleep(3)
+validation = js.validate(dataset_folder_id)
+```
+
+Schema validation will identify any fields that couldn't be extracted from source material. Those gaps are surfaced to data managers via the **Curator Grid AI agent** (`https://www.synapse.org/#!Synapse:{project_id}`) which can interactively fill, clean, and validate the remaining required fields.
 
 ### Adding a Dataset to an Existing Project (ADD outcome)
 
