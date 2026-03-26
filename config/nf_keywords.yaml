@@ -1,0 +1,55 @@
+# NF / SWN keyword sets used for repository searches
+# Organized by category; all searches apply OR logic across the flat term list.
+
+disease_names:
+  - "neurofibromatosis"
+  - "neurofibromatosis type 1"
+  - "neurofibromatosis type 2"
+  - "NF1"
+  - "NF2"
+  - "schwannomatosis"
+  - "SMARCB1 loss"
+  - "LZTR1"
+
+tumor_types:
+  - "plexiform neurofibroma"
+  - "cutaneous neurofibroma"
+  - "vestibular schwannoma"
+  - "acoustic neuroma"
+  - "malignant peripheral nerve sheath tumor"
+  - "MPNST"
+  - "spinal ependymoma"
+  - "meningioma NF2"
+  - "spinal schwannoma"
+
+gene_symbols:
+  - "NF1 gene"
+  - "NF2 gene"
+  - "SMARCB1"
+  - "LZTR1"
+  - "SPRED1"
+  - "merlin"
+  - "neurofibromin"
+
+# Combined flat list used at runtime
+search_terms:
+  - "neurofibromatosis"
+  - "neurofibromatosis type 1"
+  - "neurofibromatosis type 2"
+  - "NF1"
+  - "NF2"
+  - "schwannomatosis"
+  - "SMARCB1 loss"
+  - "LZTR1"
+  - "plexiform neurofibroma"
+  - "cutaneous neurofibroma"
+  - "vestibular schwannoma"
+  - "acoustic neuroma"
+  - "malignant peripheral nerve sheath tumor"
+  - "MPNST"
+  - "spinal ependymoma"
+  - "meningioma NF2"
+  - "spinal schwannoma"
+  - "SMARCB1"
+  - "neurofibromin"
+  - "merlin NF"

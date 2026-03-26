@@ -1,0 +1,77 @@
+# NF Data Contributor Agent — Runtime Settings
+
+agent:
+  name: "NF Data Contributor Agent"
+  version: "1.0.0"
+  # Synapse project ID for the agent's own state tables
+  # Set to null on first run; the agent will create one and log the ID
+  state_project_id: null
+
+relevance:
+  model: "claude-sonnet-4-6"
+  threshold: 0.70          # Minimum relevance score (0.0–1.0)
+  require_primary_data: true
+  min_sample_count: 3      # null = no minimum
+  allowed_access_types:    # Studies must be at least one of these
+    - open
+    - controlled
+
+discovery:
+  # How many calendar days back to search on the very first run
+  initial_lookback_days: 1825  # 5 years
+  # Per-connector max results per run (guard against runaway queries)
+  max_results_per_connector: 50
+
+deduplication:
+  # Synapse table IDs for the live NF Data Portal
+  studies_table_id: "syn52694652"
+  files_table_id: "syn16858331"
+  datasets_table_id: "syn16859580"
+  # TF-IDF cosine similarity threshold for fuzzy title matching
+  fuzzy_title_threshold: 0.85
+
+synapse:
+  # Folder where pending-review projects are created.
+  # Set to a Synapse project/folder ID, or null to create top-level projects.
+  pending_review_parent_id: null
+  # Project name template: EXT_{Repository}_{AccessionID}
+  project_name_template: "EXT_{repository}_{accession_id}"
+  resource_status: "pendingReview"
+
+notifications:
+  jira:
+    enabled: true
+    project_key: "NFOSI"
+    issue_type: "Task"
+    assignee_email: "nf-osi@sagebionetworks.org"
+    # Summary template for new study tickets
+    summary_template: "Review auto-discovered study: {study_name} ({repository}:{accession_id})"
+
+connectors:
+  pubmed_geo:
+    enabled: true
+    email: "nf-data-contributor@sagebionetworks.org"
+  sra:
+    enabled: true
+  dbgap:
+    enabled: true
+  zenodo:
+    enabled: true
+  figshare:
+    enabled: true
+  osf:
+    enabled: true
+  arrayexpress:
+    enabled: true
+  ega:
+    enabled: true
+  pride:
+    enabled: true
+  metabolights:
+    enabled: true
+  pdc:
+    enabled: true
+
+logging:
+  level: "INFO"
+  json: true
