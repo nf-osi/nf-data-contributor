@@ -474,14 +474,17 @@ Each repository accession becomes a **Synapse Dataset entity** (not a plain fold
 
 **A `Dataset` entity (`org.sagebionetworks.repo.model.table.Dataset`) must be explicitly created for each accession.** Do not substitute a plain `Folder` — the Dataset entity is what appears in the NF Portal's datasets view and enables portal discovery.
 
-Files cannot be children of a Dataset entity. The structure for each accession is:
+Files cannot be children of a Dataset entity. The Dataset entity must be a **direct child of the project** (not nested in a subfolder) — Synapse only shows Datasets in the project's Datasets tab when they sit at the project root.
 
 ```
-Raw Data/
-├── {Repo}_{AccessionID}/          ← Folder (holds the actual File entities)
-│   ├── file1.fastq.gz             ← File (externalURL)
-│   └── file2.fastq.gz             ← File (externalURL)
-└── {Repo}_{AccessionID}           ← Dataset entity (references the files above)
+{Project}/                         ← Synapse Project
+├── {Repo}_{AccessionID}           ← Dataset entity (direct child of project — appears in Datasets tab)
+├── Raw Data/                      ← Folder
+│   └── {Repo}_{AccessionID}_files/← Folder (holds the actual File entities)
+│       ├── file1.fastq.gz         ← File (externalURL)
+│       └── file2.fastq.gz         ← File (externalURL)
+├── Analysis/
+└── Source Metadata/
 ```
 
 #### Step 1 — Create the files folder and populate it
@@ -509,10 +512,11 @@ for filename, download_url in file_list:
 ```python
 import json
 
-# Create the Dataset entity via REST API
+# Create the Dataset entity as a direct child of the PROJECT (not Raw Data folder)
+# so it appears in the Datasets tab
 dataset_body = {
     'name': f"{repository}_{accession_id}",
-    'parentId': raw_folder_id,
+    'parentId': project_id,   # ← project root, NOT raw_folder_id
     'concreteType': 'org.sagebionetworks.repo.model.table.Dataset',
 }
 dataset = syn.restPOST('/entity', json.dumps(dataset_body))
