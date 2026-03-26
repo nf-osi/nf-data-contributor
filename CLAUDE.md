@@ -1071,20 +1071,198 @@ If `get_file_list` returns more than **100 files**, do not create individual Fil
 
 For GEO+SRA specifically: the combined GEO supplementary + SRA FASTQ count can be large. If the total exceeds 100, create File entities for the GEO supplementary files only, and add one ExternalLink to the SRA BioProject for raw reads.
 
+### Zip Files — Flag for Interactive Processing
+
+When a repository record contains `.zip` files (or other archives like `.tar`, `.tar.gz`), **do not attempt to download and extract them in the automated run**. Instead:
+
+1. Create a `File` entity pointing to the zip's direct download URL (as normal).
+2. Add the annotation `needsExtraction: true` to that File entity.
+3. Create a JIRA ticket flagged as `interactive-processing-required` with a structured handoff prompt (see template below).
+4. Note the zip in the wiki page under a "Pending Data Manager Actions" section.
+
+The data manager will then open an interactive Claude Code session on a machine with sufficient disk/RAM, paste the handoff prompt, and Claude Code will: download the zip, inspect its contents, extract, annotate each file, and upload to Synapse storage.
+
+**JIRA ticket template for zip extraction:**
+
+```
+Summary: [Interactive] Extract and upload zip contents — {project_name} ({synapse_project_id})
+
+Description:
+The NF Data Contributor Agent indexed {zip_filename} ({zip_size_mb:.0f} MB) from {source_repository}
+as an external link in Synapse project {synapse_project_id} ({synapse_url}).
+
+To properly index the individual files inside the zip, please run an interactive Claude Code
+session on a machine with at least {recommended_disk_gb} GB free disk space and paste the
+following task prompt:
+
+---
+INTERACTIVE EXTRACTION TASK
+
+Synapse project: {synapse_project_id}
+Dataset entity: {dataset_id}
+Files folder: {files_folder_id}
+Zip file entity to replace: {zip_entity_id}
+Zip download URL: {zip_url}
+Source repository: {source_repository} ({accession_id})
+Schema URI: {schema_uri}
+Shared annotations: {json.dumps(normalized_annotations, indent=2)}
+
+Steps:
+1. Download the zip to /tmp/extract_{accession_id}/
+2. Extract and list all files with sizes
+3. For each file: create a Synapse File entity (upload to Synapse storage,
+   synapseStore=True) inside the existing files folder ({files_folder_id})
+4. Apply shared annotations + per-file specimenID/individualID/fileFormat
+5. Update the Dataset entity ({dataset_id}) items list to include all new files
+6. Delete the original zip File entity ({zip_entity_id})
+7. Print a summary of files uploaded
+---
+
+Zip entity in Synapse: {zip_entity_id}
+Recommended disk: {recommended_disk_gb} GB free
+```
+
+**Computing the recommended disk:** `max(zip_size_mb * 3, 500)` MB (allow for zip + extracted + Synapse upload buffer).
+
+```python
+import os
+
+def flag_zip_for_extraction(syn, file_entity_id, zip_url, zip_size_bytes,
+                             zip_filename, dataset_id, files_folder_id,
+                             project_id, project_name, accession_id,
+                             source_repository, schema_uri, normalized_annotations):
+    """Mark a zip File entity as needing extraction and create a JIRA handoff ticket."""
+    # Annotate the file entity
+    f = syn.get(file_entity_id, downloadFile=False)
+    f.annotations['needsExtraction'] = 'true'
+    f.annotations['zipSizeMB'] = str(round(zip_size_bytes / 1024 / 1024, 1))
+    syn.store(f)
+
+    zip_size_mb = zip_size_bytes / 1024 / 1024
+    recommended_disk_gb = max(int(zip_size_mb * 3 / 1024) + 1, 1)
+    synapse_url = f'https://www.synapse.org/#!Synapse:{project_id}'
+
+    handoff_prompt = f"""
+INTERACTIVE EXTRACTION TASK
+
+Synapse project: {project_id}
+Dataset entity: {dataset_id}
+Files folder: {files_folder_id}
+Zip file entity to replace: {file_entity_id}
+Zip download URL: {zip_url}
+Source repository: {source_repository} ({accession_id})
+Schema URI: {schema_uri}
+Shared annotations: {json.dumps(normalized_annotations, indent=2)}
+
+Steps:
+1. Download the zip to /tmp/extract_{accession_id}/
+2. Extract and list all files with sizes
+3. For each file: create a Synapse File entity (synapseStore=True) inside {files_folder_id}
+4. Apply shared annotations + per-file specimenID/individualID/fileFormat
+5. Update Dataset {dataset_id} items list to include all new files
+6. Delete the original zip File entity {file_entity_id}
+7. Print a summary of files uploaded
+"""
+
+    # Create JIRA ticket if configured
+    base_url = os.environ.get('JIRA_BASE_URL', '').rstrip('/')
+    email = os.environ.get('JIRA_USER_EMAIL', '')
+    token = os.environ.get('JIRA_API_TOKEN', '')
+    if base_url and email and token:
+        import httpx
+        payload = {
+            'fields': {
+                'project': {'key': 'NFOSI'},
+                'summary': f'[Interactive] Extract zip — {project_name[:80]} ({project_id})',
+                'description': {
+                    'type': 'doc', 'version': 1,
+                    'content': [{'type': 'paragraph', 'content': [
+                        {'type': 'text', 'text':
+                         f'Zip: {zip_filename} ({zip_size_mb:.0f} MB)\n'
+                         f'Synapse: {synapse_url}\n\n'
+                         f'Paste this prompt into an interactive Claude Code session '
+                         f'on a machine with {recommended_disk_gb} GB free:\n\n'
+                         + handoff_prompt}
+                    ]}]
+                },
+                'issuetype': {'name': 'Task'},
+                'labels': ['interactive-processing-required', 'zip-extraction'],
+            }
+        }
+        resp = httpx.post(f'{base_url}/rest/api/3/issue',
+                          json=payload, auth=(email, token), timeout=15)
+        if resp.status_code in (200, 201):
+            print(f"  JIRA ticket created: {resp.json().get('key')}")
+
+    return handoff_prompt
+```
+
 ### Required Annotations
 
 **Critical rule: only apply annotation values that are valid per the registered schema.**
 Do not hardcode annotation values. Fetch the schema's enum fields at runtime (Step B of the annotation workflow below) and only set values that appear in those enum lists. Applying a field with an invalid value is worse than omitting it — it will appear as a schema validation error.
 
-**Project-level** (apply to the Synapse project):
-| Key | Value |
-|-----|-------|
-| study | {suggested_project_name} |
-| resourceType | `experimentalData` (valid schema enum) |
-| resourceStatus | `pendingReview` |
-| fundingAgency | `Not Applicable (External Study)` |
-| pmid | {pmid if available} |
-| doi | {doi if available} |
+**Project-level** (apply to the Synapse project via `/entity/{project_id}/annotations2`):
+
+These annotations power the NF Data Portal's Studies tab and materialized view (`syn52694652`). Match the field names and value vocabulary used in that table.
+
+| Key | Value | Notes |
+|-----|-------|-------|
+| `studyName` | `{suggested_project_name}` | Full publication title |
+| `studyStatus` | `Completed` | Published studies with deposited data are complete |
+| `dataStatus` | `Available` | Data is publicly accessible in the source repository |
+| `diseaseFocus` | `["Neurofibromatosis type 1"]` etc. | List; use portal vocabulary (e.g. "Neurofibromatosis type 1", "Neurofibromatosis type 2", "Schwannomatosis", "MPNST") |
+| `manifestation` | `["MPNST"]` etc. | List; tumor/disease manifestation (e.g. "Plexiform Neurofibroma", "MPNST", "Schwannoma", "Vestibular Schwannoma", "Low Grade Glioma") |
+| `dataType` | `["geneExpression"]` etc. | List; portal vocabulary: `geneExpression`, `genomicVariants`, `proteomics`, `drugScreen`, `immunoassay`, `image`, `surveyData`, `clinicalData`, `other` |
+| `studyLeads` | `["First Author", "Last Author"]` | From publication author list; include first + last/corresponding |
+| `institutions` | `["University of X"]` | From author affiliations if available in PubMed record |
+| `fundingAgency` | extracted from grant metadata or `Not Applicable (External Study)` | See funder extraction below |
+| `resourceStatus` | `pendingReview` | Agent sets this; data manager changes to `approved` |
+| `pmid` | `{pmid}` | If available |
+| `doi` | `{doi}` | If available |
+
+Apply these with the same `/annotations2` pattern used for Dataset entities:
+
+```python
+ann = syn.restGET(f'/entity/{project_id}/annotations2')
+ann['annotations'] = {
+    'studyName':     {'type': 'STRING', 'value': [project_name]},
+    'studyStatus':   {'type': 'STRING', 'value': ['Completed']},
+    'dataStatus':    {'type': 'STRING', 'value': ['Available']},
+    'diseaseFocus':  {'type': 'STRING', 'value': disease_focus_list},
+    'manifestation': {'type': 'STRING', 'value': manifestation_list},
+    'dataType':      {'type': 'STRING', 'value': data_type_list},
+    'studyLeads':    {'type': 'STRING', 'value': study_leads_list},
+    'institutions':  {'type': 'STRING', 'value': institutions_list},
+    'fundingAgency': {'type': 'STRING', 'value': funding_agency_list},
+    'resourceStatus':{'type': 'STRING', 'value': ['pendingReview']},
+    'pmid':          {'type': 'STRING', 'value': [pmid]} if pmid else {},
+    'doi':           {'type': 'STRING', 'value': [doi]}  if doi  else {},
+}
+syn.restPUT(f'/entity/{project_id}/annotations2', json.dumps(ann))
+```
+
+**Vocabulary guidance** — derive these values from the publication metadata through reasoning:
+- `diseaseFocus`: map from abstract keywords to portal terms (NF1 → "Neurofibromatosis type 1", NF2 → "Neurofibromatosis type 2", SWN → "Schwannomatosis")
+- `manifestation`: infer from tumor type mentioned in abstract/methods (MPNST, plexiform neurofibroma, schwannoma, OPG, etc.)
+- `dataType`: map from assay to portal term (RNA-seq/scRNA-seq → `geneExpression`; WGS/WES/SNP array → `genomicVariants`; mass spec → `proteomics`; drug screen → `drugScreen`; flow cytometry → `immunoassay`; MRI/histology → `image`)
+- `studyLeads`: extract first author and last/corresponding author from the PubMed author list
+- `institutions`: extract from PubMed affiliation field of first/last author
+
+**Funder extraction** — check in order, use first source that yields a result:
+
+1. **PubMed GrantList** (most reliable for NIH-funded work): the `GrantList` field in the PubMed XML record contains `Agency` (funder name) and `GrantID` entries. Extract the `Agency` values. Common NF funders to recognise: `NCI`, `NINDS`, `NIH`, `DoD`, `NF-OSI`, `CTF` (Children's Tumor Foundation), `GFF` (Gilbert Family Foundation), `NTAP` (Neurofibromatosis Therapeutic Acceleration Program).
+
+   ```python
+   grants = art.get('GrantList', [])
+   funding_agencies = list({g.get('Agency', '') for g in grants if g.get('Agency')})
+   ```
+
+2. **Acknowledgements section** (via Europe PMC full-text or PubMed abstract): if no GrantList, look for "funded by", "supported by", "grant from" phrases in the abstract or acknowledgements.
+
+3. **Zenodo/repository metadata**: Zenodo records sometimes list funders in `metadata.grants`.
+
+4. **Fallback**: if no funder information is found, use `['Not Applicable (External Study)']`.
 
 **File level** (apply to **each individual File entity** — this is what appears in the NF Portal files table):
 
