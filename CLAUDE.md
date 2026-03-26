@@ -933,22 +933,149 @@ For GEO+SRA specifically: the combined GEO supplementary + SRA FASTQ count can b
 | fileFormat | {from repository metadata} |
 | resourceStatus | pendingReview |
 
-### Assay Vocabulary Normalization
+### Annotation Vocabulary — Runtime Schema Query (do NOT hardcode enum values)
 
-| Raw term (case-insensitive) | NF Portal term |
-|-----------------------------|---------------|
-| rnaseq, rna-seq, bulk rnaseq | rnaSeq |
-| scrna-seq, scrna, single cell rna | scrnaSeq |
-| chipseq, chip-seq | ChIPSeq |
-| atacseq, atac-seq | ATACSeq |
-| wgs, whole genome | wholeGenomeSeq |
-| wes, whole exome | wholeExomeSeq |
-| microarray | geneExpressionArray |
-| methylation, bisulfite | methylationArray / bisulfiteSeq |
-| lc-ms, mass spec, proteomics | LC-MS |
-| metabolomics | metabolomics |
-| mirna, mirna-seq | miRNASeq |
-| snp array, snp | SNPArray |
+The NF metadata dictionary has hundreds of controlled terms across dozens of fields that change with each release. **Never hardcode a lookup table.** Instead:
+
+1. Fetch valid enum values from the registered Synapse schema at runtime
+2. Extract raw values from source material (GEO/SRA/paper)
+3. Use Claude to map raw → valid enum (it sees the full allowed list)
+
+#### Step A — Fetch valid enum values from the registered schema
+
+```python
+import httpx, json
+
+def fetch_schema_enums(schema_uri: str) -> dict[str, list[str]]:
+    """
+    Fetch a registered NF JSON schema and extract all enum value lists.
+    Returns: {field_name: [allowed_value, ...]}
+    """
+    url = f'https://repo-prod.prod.sagebase.org/repo/v1/schema/type/registered/{schema_uri}'
+    resp = httpx.get(url, timeout=15)
+    resp.raise_for_status()
+    schema = resp.json()
+
+    enums = {}
+
+    def extract_enums(obj, path=''):
+        if isinstance(obj, dict):
+            if 'enum' in obj and path:
+                field = path.rsplit('.', 1)[-1]
+                enums[field] = obj['enum']
+            for k, v in obj.items():
+                extract_enums(v, f'{path}.{k}' if path else k)
+        elif isinstance(obj, list):
+            for item in obj:
+                extract_enums(item, path)
+
+    extract_enums(schema)
+    return enums
+
+# Usage: fetch enums for the scrnaSeq template
+enums = fetch_schema_enums('org.synapse.nf-scrnaseqtemplate')
+# enums['assay'] → ['single-cell RNA-seq', 'RNA-seq', ...]
+# enums['species'] → ['Homo sapiens', 'Mus musculus', ...]
+# enums['diagnosis'] → ['Neurofibromatosis type 1', ...]
+```
+
+#### Step B — Extract raw metadata from source material
+
+Before normalizing, extract raw values from every available source. The goal is to pre-fill **all** fields that can be inferred — not just the obvious ones.
+
+**From SRA runinfo CSV** (fetch via `Entrez.efetch(db='sra', id=sra_id, rettype='runinfo')`):
+```
+Column          → NF field
+Platform        → platform (e.g. "ILLUMINA" → look up exact Synapse enum)
+Model           → platform (more specific, e.g. "Illumina NovaSeq 6000")
+LibraryStrategy → assay (e.g. "RNA-Seq", "WGS", "ChIP-Seq")
+LibraryLayout   → libraryStrand clue (PAIRED/SINGLE)
+LibrarySelection→ libraryPreparationMethod clue
+ScientificName  → species
+BioSample       → specimenID
+Run (SRR...)    → individualID clue (or use BioSample)
+```
+
+**From GEO sample-level SOFT** (fetch via `Entrez.efetch(db='gds', id=gds_id, rettype='soft')`):
+Parse `!Sample_characteristics_ch1` lines from each GSM record — these contain:
+```
+tissue: neurofibroma
+cell type: primary NF1-/- Schwann cells
+treatment: vehicle control
+Sex: male
+individual: Patient-01
+library preparation method: 10x Genomics Chromium
+```
+Also parse `!Sample_molecule_ch1` (RNA/DNA/protein), `!Sample_extract_protocol_ch1` (library prep details).
+
+**From PubMed abstract/methods** (when PMID is available):
+Use Claude to extract from the abstract or full methods section:
+- tissue/tumor type, patient cohort details, specimen preparation (FFPE/frozen/fresh),
+  library kit, sequencing platform, number of individuals vs specimens
+
+#### Step C — Normalize raw values to schema terms using Claude
+
+Once you have raw extracted values AND the valid enum list from Step A, ask Claude to map them:
+
+```python
+import anthropic, json, os
+
+client = anthropic.Anthropic(api_key=os.environ['ANTHROPIC_API_KEY'])
+
+def normalize_annotations_with_schema(raw_metadata: dict, enums: dict) -> dict:
+    """
+    raw_metadata: dict of field → raw extracted string
+    enums: dict of field → list of valid enum values (from fetch_schema_enums)
+    Returns: dict of field → best-matching valid enum value (or None if no match)
+    """
+    # Only include fields where we have both a raw value and an enum list
+    fields_to_map = {
+        k: {'raw': raw_metadata[k], 'valid_values': enums.get(k, [])}
+        for k in raw_metadata
+        if raw_metadata[k] and enums.get(k)
+    }
+
+    if not fields_to_map:
+        return {}
+
+    prompt = f"""Map each raw metadata value to the closest valid controlled term.
+If no valid term matches reasonably, use null.
+
+Fields to map:
+{json.dumps(fields_to_map, indent=2)}
+
+Return JSON with the same field names, each mapped to the best matching valid_value string (or null).
+Do not invent values. Only choose from the provided valid_values lists."""
+
+    msg = client.messages.create(
+        model='claude-sonnet-4-6',
+        max_tokens=1024,
+        messages=[{'role': 'user', 'content': prompt}]
+    )
+    text = msg.content[0].text.strip()
+    if text.startswith('```'):
+        text = text.split('\n', 1)[1].rsplit('```', 1)[0]
+    return json.loads(text)
+```
+
+#### Step D — Fill remaining fields from source before marking incomplete
+
+Many fields flagged as "missing" by schema validation can be inferred:
+
+| Schema field | Source |
+|---|---|
+| `platform` | SRA runinfo `Model` column |
+| `libraryPreparationMethod` | SRA `LibrarySelection` + GEO `!Sample_extract_protocol_ch1` |
+| `libraryStrand` | SRA `LibraryLayout` (PAIRED→Unstranded typical; parse protocol for stranded info) |
+| `specimenPreparationMethod` | GEO characteristics: "tissue preservation: FFPE" → `FFPE` |
+| `specimenID` | GEO characteristics: "specimen id: ..." or BioSample accession as fallback |
+| `individualID` | GEO characteristics: "individual: Patient-01" or SRA `Subject_ID` |
+| `sex` | GEO characteristics: "Sex: male" |
+| `age` | GEO characteristics: "age: 34" |
+| `tumorType` | GEO characteristics: "tumor type: ..." + abstract |
+| `diagnosis` | GEO characteristics: "disease: ..." + abstract |
+
+Store all extracted fields as annotations on the dataset folder. Schema validation will show which ones still need human review — the Curator Grid AI agent (at `https://www.synapse.org/#!Synapse:{project_id}`) can be used by data managers to fill and clean remaining required fields interactively.
 
 ### Adding a Dataset to an Existing Project (ADD outcome)
 
