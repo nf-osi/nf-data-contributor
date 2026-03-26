@@ -1049,17 +1049,40 @@ Do not invent values. Only choose from the provided valid_values lists."""
 
 #### Step D — Apply annotations to File entities, then validate
 
-After normalizing, apply the full annotation set to **each individual File entity** (not just the folder). Then run schema validation on the folder:
+After normalizing, apply the full annotation set to **each individual File entity**. Annotation fields fall into two categories — shared across all files in the dataset, and per-file fields that vary by specimen.
+
+**Shared across all files** (same value for every file in the dataset):
+`assay`, `species`, `diagnosis`, `tumorType`, `platform`, `libraryPreparationMethod`, `libraryStrand`, `specimenPreparationMethod`, `study`, `externalAccessionID`, `externalRepository`, `accessType`, `dataType`, `dataSubtype`, `resourceStatus`
+
+**Per-file** (individually assigned):
+- `fileFormat`: infer from the file's own extension (`.fastq.gz` → `fastq`, `.bam` → `bam`, `.mtx.gz` → `mtx`)
+- `specimenID`: one specimen per file — parse from the filename if the repository embeds a sample ID there (e.g. `GSM9474150_sample_matrix.mtx.gz` → `GSM9474150`), or cross-reference the sample metadata table from Step B
+- `individualID`: same approach — parse from filename or sample sheet
+
+Build a sample→specimen map from the repository's sample-level metadata before the annotation loop. Do not assign the full list of all specimens to every file — each file belongs to exactly one specimen.
 
 ```python
-# Apply annotations to every File inside the dataset folder
+import re
+
 for child in syn.getChildren(dataset_folder_id, includeTypes=['file']):
-    file_entity = syn.get(child['id'], downloadFile=False)
-    file_entity.annotations.update(normalized_annotations)
-    # Add file-specific fields
-    ext = child['name'].rsplit('.', 1)[-1].lower().replace('gz', '').rstrip('.')
-    file_entity.annotations['fileFormat'] = ext  # e.g. 'fastq', 'bam', 'mtx'
-    syn.store(file_entity)
+    f = syn.get(child['id'], downloadFile=False)
+    f.annotations.update(shared_annotations)
+
+    # fileFormat: strip compression suffix, take final extension
+    name_lower = re.sub(r'\.(gz|zip|bz2)$', '', child['name'].lower())
+    f.annotations['fileFormat'] = name_lower.rsplit('.', 1)[-1]
+
+    # specimenID / individualID: parse from filename prefix or sample map
+    m = re.match(r'([A-Z]+\d+)[_.]', child['name'])
+    sample_id = m.group(1) if m else None
+    if sample_id and sample_id in sample_map:
+        f.annotations['specimenID'] = sample_id
+        f.annotations['individualID'] = sample_map[sample_id].get('individualID', sample_id)
+    elif sample_id:
+        f.annotations['specimenID'] = sample_id
+        f.annotations['individualID'] = sample_id
+
+    syn.store(f)
 
 # Bind schema to folder (for Curator Grid) and validate
 js = syn.service('json_schema')
