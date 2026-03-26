@@ -418,7 +418,7 @@ Return JSON with exactly these fields:
   "tissue_types": <list e.g. ["neurofibroma","schwannoma"]>,
   "is_primary_data": <bool>,
   "access_notes": <string>,
-  "suggested_project_name": <string — clean publication title for Synapse project name, max 100 chars>
+  "suggested_project_name": <string — clean publication title for Synapse project name, max 250 chars, do NOT truncate mid-word>
 }}"""
     }]
 )
@@ -436,32 +436,140 @@ result = json.loads(message.content[0].text)
 ## Synapse Project Structure
 
 ### Project Name
-Use the **publication title** (cleaned, max 100 characters) as the project name. This is `suggested_project_name` from the Claude scoring response. Do not use accession IDs in the project name.
+Use the **full publication title** as the project name (`suggested_project_name` from Claude scoring). Do not use accession IDs in the project name. Synapse supports up to 256 characters.
 
-Examples:
-- `Gene Expression Profiling of MPNSTs in Patients with NF1`
-- `Single-cell RNA-seq of NF1-associated High-Grade Glioma`
+If the title genuinely exceeds 250 characters, truncate at the last word boundary before 250 and append `"..."` — never cut mid-word.
 
-If a publication title is not available (no PMID, no paper), fall back to a descriptive name based on the dataset title.
+```python
+def safe_project_name(title: str, max_len: int = 250) -> str:
+    if len(title) <= max_len:
+        return title
+    truncated = title[:max_len].rsplit(' ', 1)[0]
+    return truncated + '...'
+```
+
+If a publication title is not available (no PMID, no paper), fall back to the repository dataset title.
 
 ### Folder Hierarchy — Multiple Datasets Per Project
+
+Each repository accession becomes a **Synapse Dataset entity** (not a plain folder) inside `Raw Data/`. Individual files within that Dataset are `File` entities with `externalURL` pointing to direct download URLs.
+
 ```
-{Publication Title}/
-├── Raw Data/
-│   ├── GEO_{AccessionID}/            ← dataset subfolder
-│   │   ├── sample1_counts.txt.gz     ← File entity (externalURL = direct download)
-│   │   ├── sample2_counts.txt.gz     ← File entity (externalURL = direct download)
-│   │   └── README.txt                ← File entity or ExternalLink to landing page
-│   ├── SRA_{AccessionID}/
-│   │   ├── SRR123456_1.fastq.gz      ← File entity (externalURL = ENA FTP URL)
-│   │   └── SRR123456_2.fastq.gz
-│   └── PRIDE_{AccessionID}/
-│       ├── sample.raw                ← File entity (externalURL = PRIDE FTP URL)
-│       └── sample.mzML
-├── Analysis/
-└── Source Metadata/
-    └── Publication metadata (wiki with abstract, authors, DOI, PMID)
+{Publication Title}/                        ← Synapse Project
+├── Raw Data/                               ← Folder
+│   ├── GEO_{AccessionID}                   ← Dataset entity
+│   │   ├── GSE301187_counts.txt.gz         ← File (externalURL = GEO FTP URL)
+│   │   ├── GSE301187_metadata.txt          ← File (externalURL = GEO FTP URL)
+│   │   └── [SRA runs listed here too       ← see GEO+SRA note below]
+│   ├── SRA_{BioProjectID}                  ← Dataset entity (if SRA-only accession)
+│   │   ├── SRR123456_1.fastq.gz            ← File (externalURL = ENA https URL)
+│   │   └── SRR123456_2.fastq.gz            ← File (externalURL = ENA https URL)
+│   └── PRIDE_{AccessionID}                 ← Dataset entity
+│       ├── sample1.raw                     ← File (externalURL = PRIDE FTP URL)
+│       └── sample1.mzML                    ← File (externalURL = PRIDE FTP URL)
+├── Analysis/                               ← Folder
+└── Source Metadata/                        ← Folder
+    └── wiki: abstract, authors, DOI, PMID
 ```
+
+### Creating Synapse Dataset entities
+
+Use `synapseclient.Dataset` for each accession container. If not available in the installed version, fall back to `Folder` with `contentType=dataset` annotation.
+
+```python
+try:
+    from synapseclient import Dataset
+    dataset_entity = syn.store(Dataset(
+        name=f"{repository}_{accession_id}",
+        parentId=raw_folder_id,
+    ))
+except (ImportError, AttributeError):
+    # Fallback for older synapseclient versions
+    from synapseclient import Folder
+    dataset_entity = syn.store(Folder(
+        name=f"{repository}_{accession_id}",
+        parentId=raw_folder_id,
+    ))
+
+dataset_id = dataset_entity.id
+
+# Annotate the Dataset
+entity = syn.get(dataset_id)
+entity.annotations.update({
+    'contentType': 'dataset',
+    'externalAccessionID': accession_id,
+    'externalRepository': repository,
+    'accessType': access_type,
+    'assay': assay,
+    'species': species,
+    'resourceStatus': 'pendingReview',
+    ...
+})
+syn.store(entity)
+```
+
+Then create individual `File` entities with `externalURL` inside the Dataset:
+
+```python
+from synapseclient import File
+
+file_entity = syn.store(File(
+    name=filename,
+    parentId=dataset_id,
+    synapseStore=False,
+    externalURL=direct_download_url,
+))
+```
+
+### GEO + SRA: always enumerate individual SRA runs
+
+**This is the most common case.** Most GEO series have supplementary processed files AND raw reads deposited in SRA. You must enumerate both:
+
+**Step A — GEO supplementary files** (processed counts, matrices, etc.):
+```python
+import httpx, re
+
+# Fetch the GEO SOFT record to find supplementary file FTP URLs
+handle = Entrez.efetch(db='gds', id=gds_numeric_id, rettype='soft', retmode='text')
+soft_text = handle.read()
+# Extract !Series_supplementary_file lines — each is a direct ftp:// URL
+ftp_urls = re.findall(r'!Series_supplementary_file\s*=\s*(ftp://\S+)', soft_text)
+# Convert ftp:// → https:// for Synapse externalURL
+https_urls = [u.replace('ftp://', 'https://') for u in ftp_urls]
+```
+
+**Step B — linked SRA runs via ENA** (raw FASTQ files):
+```python
+# Find SRA BioProject linked to this GEO series
+handle = Entrez.elink(dbfrom='gds', db='sra', id=gds_numeric_id)
+links = Entrez.read(handle)
+sra_ids = [l['Id'] for linkset in links for db in linkset.get('LinkSetDb', [])
+           for l in db.get('Link', [])]
+
+# For each SRA study/experiment, get run-level FASTQ URLs from ENA
+for sra_id in sra_ids[:50]:  # cap at 50 runs
+    handle = Entrez.efetch(db='sra', id=sra_id, rettype='runinfo', retmode='text')
+    runinfo = handle.read()
+    # Parse CSV: SRR accessions are in 'Run' column
+    # Then fetch ENA file report for direct FASTQ URLs:
+    srr_acc = ...  # extract from runinfo
+    ena_resp = httpx.get(
+        'https://www.ebi.ac.uk/ena/portal/api/filereport',
+        params={
+            'accession': srr_acc,
+            'result': 'read_run',
+            'fields': 'run_accession,fastq_ftp,fastq_bytes',
+            'format': 'json'
+        }
+    )
+    for row in ena_resp.json():
+        for ftp_path in row.get('fastq_ftp', '').split(';'):
+            if ftp_path:
+                https_url = 'https://' + ftp_path.replace('ftp.sra.ebi.ac.uk/', 'ftp.sra.ebi.ac.uk/')
+                # Create File entity with this URL inside the GEO Dataset
+```
+
+Put both GEO supplementary files AND SRA FASTQ files inside the **same** `GEO_{AccessionID}` Dataset entity — they are all part of the same deposit.
 
 Each dataset subfolder is annotated with the accession-specific metadata (assay, file format, etc.). The project itself is annotated with publication-level metadata.
 
@@ -557,10 +665,12 @@ Use `ExternalLink` to `https://www.ncbi.nlm.nih.gov/projects/gap/cgi-bin/study.c
 
 ### File Count Limits Per Dataset
 
-If a repository accession has more than **100 individual files**, do not create one File entity per file. Instead:
-- Create a single `ExternalLink` to the repository landing page
-- Add a note in the dataset folder wiki: "This dataset contains N files. Browse and download at {url}"
-- This prevents projects with thousands of FASTQ files from becoming unusable in the portal
+If a Dataset entity would contain more than **100 individual File entities** (e.g., a study with 200 samples × 2 FASTQ files = 400 files), do not create one File per file. Instead:
+- Create a single `File` entity named `file_manifest.txt` whose `externalURL` points to a manifest or the repository landing page
+- Add a wiki on the Dataset: "This dataset contains N files. Browse and download individually at {landing_page_url}"
+- This prevents large studies from creating thousands of Synapse entities
+
+For GEO+SRA specifically: if the GEO series has >50 SRA runs, create File entities for the GEO supplementary files only, and add one additional File entity pointing to the SRA BioProject page for raw reads.
 
 ### Required Annotations
 
