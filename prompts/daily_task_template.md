@@ -158,18 +158,88 @@ For each approved group (max 50 write operations total):
 - Agent-created project: add new dataset subfolder to its `Raw Data/` folder
 - Portal-managed project: create [Manual] JIRA ticket, skip write
 
-Save `/tmp/nf_agent/created_projects.json`.
+Save `/tmp/nf_agent/created_projects.json` with the full schema defined in `prompts/synapse_workflow.md` (project_id, project_name, pmid, doi, abstract, outcome, datasets[]).
 Print each action: `Created: "Project Name" (synXXX) — N datasets, M files`
 
 ---
 
-## Step 7 — JIRA Notifications
+## Step 7 — Self-Audit and Remediation
+
+**Read `prompts/synapse_workflow.md` for the full implementation of all three audit phases.**
+
+This step checks every project created in Step 6 against the completion checklist and fixes any issues found. Run it in three sub-steps:
+
+### 7a — Write and run `/tmp/nf_agent/audit.py` (Phase 1)
+
+The audit script (code in `prompts/synapse_workflow.md`):
+- Fetches the current state of every project, dataset, and file entity created this run
+- **Auto-fixes** all mechanical issues immediately (no reasoning required):
+  - `studyStatus` wrong value → `Completed`
+  - `dataStatus` missing → `Available`
+  - `resourceStatus` missing → `pendingReview`
+  - `studyName` missing → set from project name
+  - `fundingAgency` missing → `Not Applicable (External Study)`
+  - `pmid`/`doi` missing but known → set from project metadata
+  - NF-OSI team permissions (3378999) missing → grant
+  - Dataset `items` empty → re-link from files folder
+  - Dataset `columnIds` missing → create columns
+  - Dataset entity annotations missing → set defaults
+  - `fileFormat` with compression suffix (`.gz`) → strip to bare extension
+  - `resourceType` missing → `experimentalData`
+  - `externalAccessionID`/`externalRepository`/`study` missing → set from known metadata
+  - `dataSubtype` missing → infer from file extension (`raw` for fastq/bam/vcf, `processed` otherwise)
+  - `specimenID`/`individualID` parseable from filename (GSM/SRR/ERR prefix) → set
+  - Schema binding missing → bind the schema
+- **Collects context** for issues that require reasoning (annotation fields that need domain knowledge)
+- Prints a structured report and writes `/tmp/nf_agent/audit_results.json`
+
+### 7b — Agent reasoning (Phase 2)
+
+After running `audit.py`, read `/tmp/nf_agent/audit_results.json`. For each project with `reasoning_gaps`:
+
+1. Read the available context: abstract (stored in audit_results), project annotations, wiki
+2. If PMID is known and abstract is missing, fetch it from PubMed
+3. Reason through each gap:
+   - `diseaseFocus`, `manifestation` → infer from disease mentions in title + abstract
+   - `dataType` → infer from assay type
+   - `studyLeads` → fetch first + last author from PubMed AuthorList if PMID available; otherwise infer from abstract
+   - `institutions` → from author affiliations in PubMed record or abstract
+   - `alternateDataRepository` → reconstruct from accession_id + REPO_TO_PREFIX
+   - `assay`, `species`, `tumorType`, `diagnosis` → infer from abstract + experimental description
+   - `platform` → fetch from repository (GEO series platform field, SRA instrument_model in runinfo)
+   - `libraryPreparationMethod` → look for kit/method names in abstract ("10x Chromium", "Smart-seq2", "polyA")
+   - `specimenID` where auto-parse failed → look at repository sample metadata (GEO GSM table, SRA BioSample)
+   - `wiki` missing → create from wiki template (in `prompts/synapse_workflow.md`) using available metadata
+4. Write `/tmp/nf_agent/audit_reasoning_fixes.json` with all resolved values
+
+### 7c — Write and run `/tmp/nf_agent/apply_audit_fixes.py` (Phase 3)
+
+The apply script (code in `prompts/synapse_workflow.md`):
+- Reads `audit_reasoning_fixes.json`
+- Applies all project annotation fixes via `/entity/{id}/annotations2`
+- Creates missing wikis
+- Updates file annotations with the reasoned values
+- Prints a final summary
+
+After Phase 3, print the complete audit report:
+```
+=== Self-Audit Report ===
+Projects audited:   N
+Auto-fixes applied: N
+Reasoning fixes:    N
+Warnings remaining: N
+========================
+```
+
+---
+
+## Step 8 — JIRA Notifications
 
 Write and run `/tmp/nf_agent/notify.py`. Attempt ticket creation; log 401/placeholder errors as warnings and continue.
 
 ---
 
-## Step 8 — Update State Tables
+## Step 9 — Update State Tables
 
 Write and run `/tmp/nf_agent/update_state.py`. Record every accession evaluated. Append run summary row. Print:
 
@@ -184,6 +254,8 @@ Dedup — new: N | add: N | skip: N | near-matches: N
 After scoring: N approved
 Synapse projects created: N
 Datasets added to existing: N
+Audit auto-fixes: N
+Audit reasoning fixes: N
 Errors: N
 ================================================
 ```
@@ -193,6 +265,7 @@ Errors: N
 ## Error Handling
 
 - On any step failure, log the error, continue to the next step where safe
-- Always run Step 8 regardless of earlier failures
+- Always run Step 9 regardless of earlier failures
 - If Europe PMC returns nothing for a PMID (paper not in open-access PMC), continue — that's expected
 - If NCBI rate-limits you, wait 1 second between elink batches (use `time.sleep(1)`)
+- If audit Phase 1 fails for a project, log the error and continue to the next project — do not abort the whole audit
