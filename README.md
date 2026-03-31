@@ -1,8 +1,8 @@
-# NF Data Contributor Agent
+# NADIA — NF Automated Data Ingestion Agent
 
 An autonomous data curation agent for the [NF Data Portal](https://nf.synapse.org), operated by the [NF Open Science Initiative (NF-OSI)](https://nf.synapse.org/About) at Sage Bionetworks.
 
-The agent runs daily, discovers publicly available neurofibromatosis (NF) and schwannomatosis (SWN) research datasets from scientific repositories, and provisions Synapse "pointer" projects for data manager review. It is powered by [Claude Code](https://claude.ai/code) and uses the Anthropic API for relevance scoring and annotation normalization.
+NADIA runs daily, discovers publicly available neurofibromatosis (NF) and schwannomatosis (SWN) research datasets from scientific repositories, and provisions Synapse "pointer" projects for data manager review. It is powered by [Claude Code](https://claude.ai/code) and uses the Anthropic API for relevance scoring and annotation normalization.
 
 ---
 
@@ -10,7 +10,7 @@ The agent runs daily, discovers publicly available neurofibromatosis (NF) and sc
 
 ```mermaid
 flowchart TD
-    A([Daily trigger\nGitHub Actions]) --> B
+    A([NADIA\nDaily trigger\nGitHub Actions]) --> B
 
     subgraph DISCOVER["1 · Discovery"]
         B[PubMed search\nNF/SWN MeSH + keywords\nlast 30 days] --> C[NCBI elink\npubmed → gds / sra / gap]
@@ -178,7 +178,7 @@ See [GitHub setup instructions](#github-actions-setup) below.
 3. **Create the workflow file** at `.github/workflows/daily_run.yml`:
 
    ```yaml
-   name: NF Data Contributor — Daily Run
+   name: NADIA — Daily Run
 
    on:
      schedule:
@@ -224,7 +224,7 @@ See [GitHub setup instructions](#github-actions-setup) below.
 
 4. **Enable Actions** in your repository (Settings → Actions → Allow all actions).
 
-5. **Test with a manual trigger**: Go to Actions → NF Data Contributor — Daily Run → Run workflow.
+5. **Test with a manual trigger**: Go to Actions → NADIA — Daily Run → Run workflow.
 
 ---
 
