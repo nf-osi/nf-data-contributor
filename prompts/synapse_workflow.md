@@ -688,7 +688,12 @@ Steps:
 def make_wiki_content(pub_title, disease_focus, assay_types, species, tissue_types,
                       pmid, doi, authors, pub_date, plain_summary, abstract,
                       datasets_table_rows, today):
-    pmid_link = f'[PMID {pmid}](https://pubmed.ncbi.nlm.nih.gov/{pmid}/)' if pmid else (doi or 'Not available')
+    pub_parts = []
+    if pmid:
+        pub_parts.append(f'[PMID:{pmid}](https://pubmed.ncbi.nlm.nih.gov/{pmid}/)')
+    if doi:
+        pub_parts.append(f'[DOI:{doi}](https://doi.org/{doi})')
+    pub_line = ' · '.join(pub_parts) if pub_parts else 'Not available'
     authors_str = ', '.join(authors[:3]) + (' et al.' if len(authors) > 3 else '')
 
     datasets_rows_md = '\n'.join(
@@ -702,7 +707,7 @@ def make_wiki_content(pub_title, disease_focus, assay_types, species, tissue_typ
 **Assay Type:** {', '.join(assay_types)}
 **Species:** {', '.join(species)}
 **Tissue / Cell Type:** {', '.join(tissue_types)}
-**Publication:** {pmid_link}
+**Publication:** {pub_line}
 **Authors:** {authors_str}
 **Publication Date:** {pub_date or 'Not available'}
 
