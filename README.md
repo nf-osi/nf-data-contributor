@@ -36,8 +36,8 @@ flowchart TD
 
     subgraph BUILD["4 · Build Synapse Project"]
         L --> M[Create Synapse project\nnamed after publication title]
-        M --> N[Create folders\nRaw Data · Analysis · Source Metadata]
-        N --> O[Per accession:\nfiles folder inside Raw Data]
+        M --> N[Create folders\nRaw Data · Source Metadata\n+ Processed Data for GEO RAW.tar]
+        N --> O[Per accession:\nfiles folder inside Raw Data\nor Processed Data]
         O --> P[Enumerate files\nENA FASTQ → SDL fallback\nGEO FTP · Zenodo · PRIDE etc.]
         P --> Q[File entities\npath= direct URL\nsynapseStore=False]
         Q --> R[Per-file annotations\nassay · species · diagnosis\nspecimenID · fileFormat · …]
@@ -45,10 +45,11 @@ flowchart TD
         S --> T[Link files as\nDataset items]
         T --> U[Bind NF JSON Schema\norg.synapse.nf-*template]
         U --> V[Wiki page\nplain-language summary\n+ abstract + datasets table]
+        V --> AA[Self-audit\nverify all annotations · fix gaps\nvalidate schema compliance]
     end
 
     subgraph STATE["5 · State & Notify"]
-        V --> W[Update state table\nNF_DataContributor_ProcessedStudies\nstatus = synapse_created]
+        AA --> W[Update state table\nNF_DataContributor_ProcessedStudies\nstatus = synapse_created]
         H --> W
         W --> X[Create JIRA ticket\npending data manager review]
     end
@@ -68,12 +69,13 @@ Each discovered publication becomes one Synapse project:
 
 ```
 {Publication Title}/                        ← Synapse Project
-├── GEO_{AccessionID}                       ← Dataset entity (Datasets tab)
+├── GEO_{AccessionID} Raw                   ← Dataset entity (Datasets tab, FASTQs)
+├── GEO_{AccessionID} Processed             ← Dataset entity (Datasets tab, processed files)
 ├── Zenodo_{AccessionID}                    ← Dataset entity (Datasets tab)
 ├── Raw Data/
-│   ├── GEO_{AccessionID}_files/            ← Folder — File entities with direct URLs
-│   └── Zenodo_{AccessionID}_files/         ← Folder — File entities with direct URLs
-├── Analysis/
+│   └── GEO_{AccessionID}_files/            ← Folder — FASTQ File entities with direct URLs
+├── Processed Data/
+│   └── GEO_{AccessionID}_files/            ← Folder — processed files (e.g. Cell Ranger output)
 └── Source Metadata/
 ```
 

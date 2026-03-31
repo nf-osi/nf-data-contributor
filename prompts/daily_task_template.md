@@ -143,7 +143,7 @@ For each approved group (max 50 write operations total):
 
 **For NEW groups:**
 1. Create Synapse project named `suggested_project_name` from Claude scoring
-2. Folder hierarchy: `Raw Data/`, `Analysis/`, `Source Metadata/`
+2. Folder hierarchy: `Raw Data/`, `Source Metadata/`
 3. For each dataset in the group:
    a. Create `{Repository}_{AccessionID}/` subfolder in `Raw Data/`
    b. Enumerate individual file download URLs from the source repository (see CLAUDE.md "How to Get Direct Download URLs Per Repository")

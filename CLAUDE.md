@@ -448,7 +448,6 @@ def safe_project_name(title: str, max_len: int = 250) -> str:
 │   └── {Repo}_{AccessionID}_files/              ← Folder (holds File entities)
 │       ├── file1.fastq.gz                       ← File (path = URL, synapseStore=False)
 │       └── file2.fastq.gz                       ← File
-├── Analysis/                                    ← Folder
 └── Source Metadata/                             ← Folder
 ```
 
@@ -578,8 +577,25 @@ Do this immediately after storing the project entity.
 
 ## JIRA Notification Pattern
 
+**CRITICAL: Always use ADF (Atlassian Document Format) for the `description` field — never a plain string with `\n` escapes.** The MCP tool and Jira REST API both double-escape `\n` in plain strings, producing literal `\\n` in the ticket. ADF uses structured paragraph objects and renders correctly.
+
 ```python
 import httpx, os
+
+def make_adf_para(text):
+    return {'type': 'paragraph', 'content': [{'type': 'text', 'text': text}]}
+
+def make_adf_para_bold(label, value):
+    return {'type': 'paragraph', 'content': [
+        {'type': 'text', 'text': label, 'marks': [{'type': 'strong'}]},
+        {'type': 'text', 'text': value},
+    ]}
+
+def make_adf_bullet(items):
+    return {'type': 'bulletList', 'content': [
+        {'type': 'listItem', 'content': [make_adf_para(item)]}
+        for item in items
+    ]}
 
 base_url = os.environ.get('JIRA_BASE_URL', '').rstrip('/')
 email = os.environ.get('JIRA_USER_EMAIL', '')
@@ -587,16 +603,32 @@ token = os.environ.get('JIRA_API_TOKEN', '')
 
 if base_url and email and token:
     synapse_url = f'https://www.synapse.org/#!Synapse:{synapse_project_id}'
+    adf_description = {
+        'type': 'doc', 'version': 1,
+        'content': [
+            make_adf_para('A new NF study has been auto-discovered and provisioned in Synapse for data manager review.'),
+            make_adf_para_bold('Synapse Project: ', synapse_url),
+            make_adf_para_bold('Study: ', project_name),
+            make_adf_para_bold('External Accessions: ', ', '.join(alternate_repos)),
+            make_adf_para_bold('Study Leads: ', ', '.join(study_leads)),
+            make_adf_para('Data Summary:'),
+            make_adf_bullet(data_summary_bullets),   # list of strings
+            make_adf_para_bold('Audit: ', audit_summary),
+        ]
+    }
     payload = {
         'fields': {
             'project': {'key': 'NFOSI'},
             'summary': f'Review auto-discovered study: {project_name}'[:254],
-            'description': { ... },
+            'description': adf_description,
             'issuetype': {'name': 'Task'},
         }
     }
     resp = httpx.post(f'{base_url}/rest/api/3/issue', json=payload, auth=(email, token))
-    resp.raise_for_status()
+    if resp.status_code not in (200, 201):
+        print(f"  JIRA warning: {resp.status_code} {resp.text[:200]}")
+    else:
+        print(f"  JIRA ticket: {resp.json().get('key')}")
 ```
 
 On 401/placeholder errors: log as warnings and continue — don't stop the run.
@@ -625,7 +657,31 @@ For repository-direct candidates (Zenodo, Figshare, OSF, etc.) found without a P
 2. If DOI but no PMID: search PubMed with `"{doi}"[doi]`
 3. If neither: search PubMed by title (first 8 words as `[tiab]`)
 4. If PMID found: use paper title as project name, group all datasets from the same paper into one project
-5. If no publication found: use repository record title, note as possible preprint
+5. If no publication found: **search bioRxiv** using key terms from the accession (mouse model name, assay method, PI institution, NF type). ENA/ArrayExpress datasets without a PMID frequently have an associated preprint posted after data submission. If a preprint is found, use it for studyLeads, doi, and wiki.
+6. If still no publication/preprint: use repository record title, note as possible preprint
+
+### Deriving `studyLeads`
+
+**Critical: the ENA/ArrayExpress submitter is NOT the PI.** Submitters are often research engineers or postdocs who performed the experiment. The `studyLeads` field should contain the first and last/corresponding author, not the submitter.
+
+Priority order:
+1. **PMID available** → PubMed AuthorList: first author + last/corresponding author
+2. **Preprint found** → preprint author list: first author + last/corresponding author
+3. **No publication** → check BioStudies `[Author]` section: role field distinguishes `principal investigator` from `submitter`/`experiment performer`. Use the PI name. If no PI role present, search the lab website for the group leader using the institution/affiliation from BioStudies.
+
+### Verifying `species`
+
+**Always verify species from the repository's taxon/organism field.** Never infer species from the disease context or mouse model name. GEO SOFT `!Series_sample_taxid`, ENA `scientific_name`, and BioStudies `Organism` attribute are authoritative. A dataset about NF1 can use human, mouse, Drosophila, or zebrafish — do not assume.
+
+### Assay specificity: `RNA-seq` vs `single-cell RNA-seq`
+
+When source metadata contains ANY of:
+- `library_source = 'TRANSCRIPTOMIC SINGLE CELL'`
+- `library_strategy = 'scRNA-seq'` or `'10X 3'' v3'`
+- `nucleicAcidSource = 'single cell'`
+- Protocol mentions `10x Chromium`, `Fluidigm C1`, `Drop-seq`, `inDrop`, `Smart-seq2` (when applied per-cell)
+
+→ Set `assay = 'single-cell RNA-seq'`, NOT `'RNA-seq'`
 
 ---
 
