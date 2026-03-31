@@ -63,6 +63,7 @@ jobs:
           claude \
             --permission-mode bypassPermissions \
             --output-format stream-json \
+            --verbose \
             --max-turns 80 \
             --add-dir "${{ github.workspace }}" \
             -p "$(cat /tmp/nf_agent/daily_task.md)"
