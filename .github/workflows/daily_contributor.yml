@@ -57,14 +57,7 @@ jobs:
 
           # Inject dates and optional seed ID into the task template
           # Use Python to avoid sed delimiter conflicts with URLs/slashes in SEED_ID
-          python3 -c '
-import os, pathlib
-t = pathlib.Path("prompts/daily_task_template.md").read_text()
-t = t.replace("{{TODAY}}",         os.environ["TODAY"])
-t = t.replace("{{LOOKBACK_DATE}}", os.environ["LOOKBACK_DATE"])
-t = t.replace("{{SEED_ID}}",       os.environ.get("SEED_ID", ""))
-pathlib.Path("/tmp/nf_agent/daily_task.md").write_text(t)
-'
+          python3 -c "import os,pathlib; t=pathlib.Path('prompts/daily_task_template.md').read_text(); t=t.replace('{{TODAY}}',os.environ['TODAY']); t=t.replace('{{LOOKBACK_DATE}}',os.environ['LOOKBACK_DATE']); t=t.replace('{{SEED_ID}}',os.environ.get('SEED_ID','')); pathlib.Path('/tmp/nf_agent/daily_task.md').write_text(t)"
 
           echo "TODAY=${TODAY}" >> "$GITHUB_ENV"
           echo "LOOKBACK_DATE=${LOOKBACK_DATE}" >> "$GITHUB_ENV"
