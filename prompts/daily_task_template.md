@@ -2,12 +2,19 @@
 
 **Today's date:** {{TODAY}}
 **Search for publications/datasets since:** {{LOOKBACK_DATE}}
+**Seed ID (direct processing):** {{SEED_ID}}
 
 ---
 
 ## Your Task
 
-Run the full NF dataset discovery pipeline using a **publication-first** approach: find papers first via PubMed, then resolve their data deposits. Write Python scripts to `/tmp/nf_agent/` and execute them. Refer to CLAUDE.md for all API patterns, auth, annotation schemas, and safety rules.
+> **Seed ID:** `{{SEED_ID}}`
+>
+> - If the Seed ID above is **empty or blank**: run the full discovery pipeline (Steps 2–9).
+> - If the Seed ID is a **PMID** (all digits, e.g. `12345678`): skip Steps 2–3. Write and run `/tmp/nf_agent/seed_lookup.py` — fetch the PubMed record, resolve linked datasets via elink + Europe PMC + DataBankList, build `publication_groups.json`, then jump to Step 4.
+> - If the Seed ID is a **repository accession** (e.g. `GSE123456`, `PXD012345`, `PRJNA123456`, `E-MTAB-1234`): skip Steps 2–3. Write and run `/tmp/nf_agent/seed_lookup.py` — fetch metadata from the appropriate repository API, look up the associated PMID/DOI if available, build `publication_groups.json`, then jump to Step 4.
+
+Write Python scripts to `/tmp/nf_agent/` and execute them. Refer to CLAUDE.md for all API patterns, auth, annotation schemas, and safety rules.
 
 ---
 
