@@ -2,6 +2,8 @@
 
 This file contains the detailed Synapse entity creation steps, annotation vocabulary workflow, zip handling, ADD outcome pattern, wiki template, and schema binding. Read this file when creating or updating Synapse projects.
 
+> **Configuration note:** All paths shown as `{WORKSPACE_DIR}/` in code examples represent the agent workspace directory. In every generated script, define `WORKSPACE_DIR` by reading `agent.workspace_dir` from `config/settings.yaml`, then use `os.path.join(WORKSPACE_DIR, 'filename.json')` for all intermediate file paths. Similarly, `TEAM_ID`, `SCHEMA_URI_PREFIX`, `METADATA_DICT_URL`, and `JIRA_PROJECT_KEY` must be read from `config/settings.yaml` — never hardcoded.
+
 ---
 
 ## Dataset Entity Creation — Required Steps
@@ -149,7 +151,7 @@ ds_body['columnIds'] = col_ids
 syn.restPUT(f'/entity/{dataset_id}', json.dumps(ds_body))
 ```
 
-### Step 5 — Bind NF schema to the files folder and validate
+### Step 5 — Bind metadata schema to the files folder and validate
 
 ```python
 import time
@@ -174,23 +176,27 @@ print(f"  Schema bound: {schema_uri}")
 
 ## Schema Selection — Dynamic, Not Hardcoded
 
-1. Fetch available templates:
+1. Fetch available templates. Read `metadata_dictionary_url` and `uri_prefix` from `config/settings.yaml`:
 ```python
-import httpx
+import httpx, yaml
 
-resp = httpx.get(
-    'https://api.github.com/repos/nf-osi/nf-metadata-dictionary/contents/registered-json-schemas',
-    timeout=15
-)
+with open('config/settings.yaml') as f:
+    cfg = yaml.safe_load(f)
+schema_cfg = cfg['synapse']['schema']
+metadata_dict_url = schema_cfg['metadata_dictionary_url']
+uri_prefix = schema_cfg['uri_prefix']
+
+resp = httpx.get(metadata_dict_url, timeout=15)
 available_templates = [f['name'].replace('.json', '') for f in resp.json() if f['name'].endswith('.json')]
 ```
 
 2. Pick the best-matching template through reasoning (read the names, understand the dataset, select).
 
-3. Convert to schema URI: lowercase and prepend `org.synapse.nf-`:
+3. Convert to schema URI: lowercase and prepend the configured URI prefix:
 ```python
-# e.g. 'ScRNASeqTemplate' → 'org.synapse.nf-scrnaseqtemplate'
-schema_uri = 'org.synapse.nf-' + template_name.lower()
+# e.g. uri_prefix='org.synapse.nf-', template='ScRNASeqTemplate'
+# → 'org.synapse.nf-scrnaseqtemplate'
+schema_uri = uri_prefix + template_name.lower()
 ```
 
 4. Verify before binding:
@@ -214,7 +220,7 @@ import httpx
 
 def fetch_schema_enums(schema_uri: str) -> dict[str, list[str]]:
     """
-    Return field_name → [valid_enum_values] for a registered NF schema.
+    Return field_name → [valid_enum_values] for a registered metadata schema.
     IMPORTANT: Must traverse the 'properties' layer, not arbitrary keys — otherwise
     you pick up enum values from unrelated schema sub-objects (e.g. finding an 'assay'
     enum inside a clinical questionnaire block of the behavioral template).
@@ -246,10 +252,10 @@ def fetch_schema_enums(schema_uri: str) -> dict[str, list[str]]:
     return enums
 ```
 
-**When to use which schema for behavioral/model organism data:**
-- `org.synapse.nf-behavioralassaytemplate` — covers both human clinical behavioral instruments AND animal model behavioral assays (open field test, rotarod, elevated plus maze, grooming, etc.). Use this for behavioral data of any species. Note: this schema always requires `compoundName`, `compoundDose`, and `compoundDoseUnit` — for non-drug studies, set these to `'Not Applicable'` / `'0'` / `'Not Applicable'` respectively. Also requires `dataType` (use `'behavioral data'` for behavioral studies).
-- `org.synapse.nf-biologicalassaydatatemplate` — has no enum constraints at all; not useful for controlled-vocabulary annotation. Avoid.
-- `org.synapse.nf-generalmeasuredatatemplate` — general quantitative measurements; has the broadest assay enum (202 values including RNA-seq, imaging, etc.).
+**When to use which schema for behavioral/model organism data** (NF-OSI dictionary; adjust template names for other dictionaries):
+- `{uri_prefix}behavioralassaytemplate` — covers both human clinical behavioral instruments AND animal model behavioral assays (open field test, rotarod, elevated plus maze, grooming, etc.). Use this for behavioral data of any species. Note: this schema always requires `compoundName`, `compoundDose`, and `compoundDoseUnit` — for non-drug studies, set these to `'Not Applicable'` / `'0'` / `'Not Applicable'` respectively. Also requires `dataType` (use `'behavioral data'` for behavioral studies).
+- `{uri_prefix}biologicalassaydatatemplate` — has no enum constraints at all; not useful for controlled-vocabulary annotation. Avoid.
+- `{uri_prefix}generalmeasuredatatemplate` — general quantitative measurements; has the broadest assay enum (202 values including RNA-seq, imaging, etc.).
 
 ### Step A2 — Fetch ALL schema property names (not just enums)
 
@@ -471,7 +477,7 @@ Common source → schema field mappings (illustrative, not exhaustive — always
 | tumor type | `tumorType` | enum |
 | data processing level | `dataSubtype` | raw/processed/normalized |
 
-Write the result to `/tmp/nf_agent/normalized_annotations.json` — keyed only by fields present in `schema_props`:
+Write the result to `{WORKSPACE_DIR}/normalized_annotations.json` — keyed only by fields present in `schema_props`:
 
 ```python
 import json
@@ -480,7 +486,7 @@ import json
 normalized = {}
 # ... populate only fields confirmed in schema_props with values confirmed in raw_metadata ...
 
-with open('/tmp/nf_agent/normalized_annotations.json', 'w') as f:
+with open('{WORKSPACE_DIR}/normalized_annotations.json', 'w') as f:
     json.dump(normalized, f, indent=2)
 print(f"  Normalized {len(normalized)} annotation fields")
 ```
@@ -648,10 +654,13 @@ Steps:
     email = os.environ.get('JIRA_USER_EMAIL', '')
     token = os.environ.get('JIRA_API_TOKEN', '')
     if base_url and email and token:
-        import httpx
+        import httpx, yaml
+        with open('config/settings.yaml') as f:
+            _cfg = yaml.safe_load(f)
+        jira_project_key = _cfg['notifications']['jira']['project_key']
         payload = {
             'fields': {
-                'project': {'key': 'NFOSI'},
+                'project': {'key': jira_project_key},
                 'summary': f'[Interactive] Extract zip — {project_name[:80]} ({project_id})',
                 'description': {
                     'type': 'doc', 'version': 1,
@@ -773,7 +782,7 @@ def store_source_metadata_file(syn, content: str | bytes, filename: str,
                                 source_metadata_folder_id: str,
                                 description: str = '') -> str:
     """Write content to a temp file and store in Synapse Source Metadata/ folder."""
-    tmp = f'/tmp/nf_agent/source_meta_{filename}'
+    tmp = f'{WORKSPACE_DIR}/source_meta_{filename}'
     mode = 'wb' if isinstance(content, bytes) else 'w'
     with open(tmp, mode, encoding=None if isinstance(content, bytes) else 'utf-8') as f:
         f.write(content)
@@ -945,8 +954,8 @@ def get_bound_schema_uri(syn, folder_id: str) -> str | None:
 ```python
 import time, httpx
 
-def bind_nf_schema(syn, files_folder_id: str, schema_uri: str) -> dict:
-    """Bind a chosen NF metadata schema to a dataset files folder and validate."""
+def bind_schema(syn, files_folder_id: str, schema_uri: str) -> dict:
+    """Bind a chosen metadata schema to a dataset files folder and validate."""
     try:
         check = httpx.get(
             f'https://repo-prod.prod.sagebase.org/repo/v1/schema/type/registered/{schema_uri}',
@@ -1002,13 +1011,13 @@ These issues were discovered when the audit was run on real agent-created projec
 
 9. **`studyLeads` must be first + last/corresponding author — not the repository submitter** — ENA/ArrayExpress submitters are typically research engineers or postdocs who performed the experiment, not the PI. The BioStudies `[Author]` section lists role (`submitter`, `experiment performer`, `principal investigator`). If only a submitter is present, search bioRxiv for a preprint using the mouse model name + assay + institution. If a preprint is found, derive studyLeads from its author list (first + last). Never default to the submitter name as studyLeads without checking for a publication or preprint.
 
-10. **`species` must be verified from the repository taxon field, never inferred** — An NF1 dataset can use human, mouse, zebrafish, or Drosophila. Always read `scientific_name` (ENA filereport), `!Series_sample_taxid` (GEO SOFT), or `Organism` (BioStudies). A dataset submitted by a mouse lab may contain human cell data (e.g. patient-derived iPSCs or bone marrow aspirates). This was the root cause of species being set to Mus musculus on a human scRNA-seq dataset (GSE196652).
+10. **`species` must be verified from the repository taxon field, never inferred** — A dataset can use human, mouse, zebrafish, or Drosophila regardless of the disease focus. Always read `scientific_name` (ENA filereport), `!Series_sample_taxid` (GEO SOFT), or `Organism` (BioStudies). A dataset submitted by a mouse lab may contain human cell data (e.g. patient-derived iPSCs or bone marrow aspirates). This was the root cause of species being set to Mus musculus on a human scRNA-seq dataset (GSE196652).
 
 11. **`assay` must reflect single-cell vs bulk** — When `library_source = 'TRANSCRIPTOMIC SINGLE CELL'`, `library_strategy` mentions scRNA, or the protocol names 10x Chromium / Fluidigm C1 / Drop-seq / Smart-seq2 (per-cell), the assay is `'single-cell RNA-seq'`, NOT `'RNA-seq'`. Setting bulk RNA-seq on a scRNA-seq dataset causes the wrong schema to be selected (rnaseqtemplate vs scrnaseqtemplate), which cascades to wrong annotation fields and wrong Curator Grid validation.
 
-12. **Model animal fields must be populated at creation, not as a post-hoc fix** — For any mouse/rat/zebrafish dataset, fetch sample metadata from the repository at creation time and populate: `modelAge`, `modelAgeUnit`, `modelSex`, `modelSpecies`, `modelSystemName`, `nf1Genotype` (if NF1 study). These values live in ENA sample attributes, GEO sample characteristics, or BioStudies sample sections. Also populate `dissociationMethod`, `specimenPreparationMethod`, `isCellLine`, `runType`, `readPair`, `libraryPrep`, `libraryStrand` — these are all available from repository protocol/library metadata and should never be left blank.
+12. **Model animal fields must be populated at creation, not as a post-hoc fix** — For any mouse/rat/zebrafish dataset, fetch sample metadata from the repository at creation time and populate: `modelAge`, `modelAgeUnit`, `modelSex`, `modelSpecies`, `modelSystemName`, and any disease-specific genotype fields defined in the metadata schema. These values live in ENA sample attributes, GEO sample characteristics, or BioStudies sample sections. Also populate `dissociationMethod`, `specimenPreparationMethod`, `isCellLine`, `runType`, `readPair`, `libraryPrep`, `libraryStrand` — these are all available from repository protocol/library metadata and should never be left blank.
 
-13. **Dataset ANNOTATION_COLUMNS must include the expanded set** — The minimum 16-column list is insufficient for scRNA-seq and model organism data. The standard set is now 22 columns, adding: `nucleicAcidSource`, `organ`, `nf1Genotype`, `modelSpecies`, `modelSex`, `sex`. Always use the full 22-column list.
+13. **Dataset ANNOTATION_COLUMNS must include the expanded set** — The minimum 16-column list is insufficient for scRNA-seq and model organism data. The standard set is now 22 columns, adding: `nucleicAcidSource`, `organ`, `modelSpecies`, `modelSex`, `sex`, and any disease-specific genotype fields from the schema. Always use the full expanded column list.
 
 ### `created_projects.json` Schema (output of Step 6, input to audit)
 
@@ -1018,7 +1027,7 @@ Step 6 must write this file. The audit reads it:
 [
   {
     "synapse_project_id": "syn74287500",
-    "project_name": "Clinical spectrum of individuals with pathogenic NF1 missense variants",
+    "project_name": "Example study title",
     "pmid": "31595648",
     "doi": "10.1038/s41436-019-0691-3",
     "pub_group_id": "pmid_31595648",
@@ -1028,7 +1037,7 @@ Step 6 must write this file. The audit reads it:
       {
         "accession_id": "4688881",
         "source_repository": "Zenodo",
-        "schema_uri": "org.synapse.nf-bulksequencingassaytemplate",
+        "schema_uri": "<uri_prefix>bulksequencingassaytemplate",
         "files_folder_id": "syn74287504",
         "dataset_id": "syn74287503",
         "landing_url": "https://zenodo.org/records/4688881"
@@ -1053,7 +1062,7 @@ import synapseclient
 
 syn = get_synapse_client()
 
-with open('/tmp/nf_agent/created_projects.json') as f:
+with open('{WORKSPACE_DIR}/created_projects.json') as f:
     created = json.load(f)
 
 ANNOTATION_COLUMNS = [
@@ -1165,20 +1174,25 @@ for proj in created:
     except Exception as e:
         result['warnings'].append(f'Project annotation check failed: {e}')
 
-    # ── 2. NF-OSI team permissions ────────────────────────────────
+    # ── 2. Data manager team permissions ─────────────────────────
+    import yaml as _yaml
+    with open('config/settings.yaml') as _f:
+        _cfg = _yaml.safe_load(_f)
+    _team_id = int(_cfg['synapse']['team_id'])
+    _team_id_str = str(_team_id)
     try:
         acl = syn.restGET(f'/entity/{project_id}/acl')
-        has_team = any(ra['principalId'] == 3378999 for ra in acl.get('resourceAccess', []))
+        has_team = any(ra['principalId'] == _team_id for ra in acl.get('resourceAccess', []))
         if not has_team:
             syn.setPermissions(
-                project_id, principalId='3378999',
+                project_id, principalId=_team_id_str,
                 accessType=['READ','DOWNLOAD','CREATE','UPDATE','DELETE',
                             'CHANGE_PERMISSIONS','CHANGE_SETTINGS','MODERATE',
                             'UPDATE_SUBMISSION','READ_PRIVATE_SUBMISSION'],
                 warn_if_inherits=False
             )
-            result['fixes_applied'].append('NF-OSI team (3378999) permissions granted')
-            print(f"  Permissions: FIXED — NF-OSI team granted access")
+            result['fixes_applied'].append(f'Data manager team ({_team_id_str}) permissions granted')
+            print(f"  Permissions: FIXED — data manager team granted access")
         else:
             print(f"  Permissions: OK")
     except Exception as e:
@@ -1454,7 +1468,7 @@ for proj in created:
     audit_results.append(result)
 
 # Write output for Phase 2
-with open('/tmp/nf_agent/audit_results.json', 'w') as f:
+with open('{WORKSPACE_DIR}/audit_results.json', 'w') as f:
     json.dump(audit_results, f, indent=2)
 
 # Print structured summary of what needs reasoning
@@ -1479,14 +1493,14 @@ if any_gaps:
 else:
     print(f"\nAll projects passed or were auto-fixed. No reasoning gaps.")
 
-print(f"\nAudit Phase 1 complete. Results: /tmp/nf_agent/audit_results.json")
+print(f"\nAudit Phase 1 complete. Results: {WORKSPACE_DIR}/audit_results.json")
 ```
 
 ---
 
 ### Phase 2 — Agent Reasoning
 
-After running `audit.py`, read `/tmp/nf_agent/audit_results.json`. For each project with `reasoning_gaps`:
+After running `audit.py`, read `{WORKSPACE_DIR}/audit_results.json`. For each project with `reasoning_gaps`:
 
 1. **Read the available context** — project annotations (studyName, alternateDataRepository), the abstract stored in audit_results, and the wiki if it exists
 2. **If PMID is available and abstract is missing**, fetch it: `Entrez.efetch(db='pubmed', id=pmid, rettype='xml')`
@@ -1501,7 +1515,7 @@ After running `audit.py`, read `/tmp/nf_agent/audit_results.json`. For each proj
    - `libraryPreparationMethod`: infer from abstract ("10x Chromium", "Smart-seq2", "polyA", etc.)
    - `specimenID` for files where auto-parse failed: look at repository sample table (GEO GSM list, SRA BioSample)
    - `wiki` missing: create using the wiki template from this file
-4. **Write `/tmp/nf_agent/audit_reasoning_fixes.json`** with all resolved values
+4. **Write `{WORKSPACE_DIR}/audit_reasoning_fixes.json`** with all resolved values
 
 ```json
 [
@@ -1550,7 +1564,7 @@ from synapseclient import Wiki
 
 syn = get_synapse_client()
 
-with open('/tmp/nf_agent/audit_reasoning_fixes.json') as f:
+with open('{WORKSPACE_DIR}/audit_reasoning_fixes.json') as f:
     fixes = json.load(f)
 
 total_projects = 0
@@ -1606,7 +1620,7 @@ The full audit prints a report like this before JIRA notifications:
 ```
 === Self-Audit Report ===
 
-syn74287500 — Clinical spectrum of NF1 missense variants
+syn74287500 — Example Study Title
   Auto-fixes: studyStatus Active→Completed, fundingAgency set, project.pmid set
   Reasoning gaps: diseaseFocus, manifestation, studyLeads, institutions, wiki missing
   File fixes: resourceStatus×1, resourceType×1, fileFormat fastq.gz→fastq ×1

@@ -1,4 +1,4 @@
-name: NF Data Contributor — Daily Run
+name: NADIA — Daily Run
 
 on:
   schedule:
@@ -53,30 +53,44 @@ jobs:
           SEED_ID="${{ github.event.inputs.seed_id }}"
 
           export TODAY LOOKBACK_DATE SEED_ID
-          mkdir -p /tmp/nf_agent
+          # Read workspace_dir from config/settings.yaml
+          WORKSPACE_DIR=$(python3 -c "import yaml; cfg=yaml.safe_load(open('config/settings.yaml')); print(cfg['agent']['workspace_dir'])")
+          mkdir -p "${WORKSPACE_DIR}"
 
-          # Inject dates and optional seed ID into the task template
+          # Inject dates, seed ID, and workspace dir into the task template
           # Use Python to avoid sed delimiter conflicts with URLs/slashes in SEED_ID
-          python3 -c "import os,pathlib; t=pathlib.Path('prompts/daily_task_template.md').read_text(); t=t.replace('{{TODAY}}',os.environ['TODAY']); t=t.replace('{{LOOKBACK_DATE}}',os.environ['LOOKBACK_DATE']); t=t.replace('{{SEED_ID}}',os.environ.get('SEED_ID','')); pathlib.Path('/tmp/nf_agent/daily_task.md').write_text(t)"
+          python3 -c "
+import os, pathlib, yaml
+cfg = yaml.safe_load(open('config/settings.yaml'))
+workspace_dir = cfg['agent']['workspace_dir']
+t = pathlib.Path('prompts/daily_task_template.md').read_text()
+t = t.replace('{{TODAY}}', os.environ['TODAY'])
+t = t.replace('{{LOOKBACK_DATE}}', os.environ['LOOKBACK_DATE'])
+t = t.replace('{{SEED_ID}}', os.environ.get('SEED_ID', ''))
+t = t.replace('{WORKSPACE_DIR}', workspace_dir)
+pathlib.Path(workspace_dir + '/daily_task.md').write_text(t)
+"
 
           echo "TODAY=${TODAY}" >> "$GITHUB_ENV"
           echo "LOOKBACK_DATE=${LOOKBACK_DATE}" >> "$GITHUB_ENV"
           echo "SEED_ID=${SEED_ID}" >> "$GITHUB_ENV"
+          echo "WORKSPACE_DIR=${WORKSPACE_DIR}" >> "$GITHUB_ENV"
           if [ -n "${SEED_ID}" ]; then
             echo "Task prompt prepared: direct processing of ${SEED_ID}"
           else
             echo "Task prompt prepared: discovery run since ${LOOKBACK_DATE}"
           fi
 
-      - name: Run NF Data Contributor Agent
+      - name: Run NADIA
         run: |
+          WORKSPACE_DIR=$(python3 -c "import yaml; cfg=yaml.safe_load(open('config/settings.yaml')); print(cfg['agent']['workspace_dir'])")
           claude \
             --permission-mode bypassPermissions \
             --output-format stream-json \
             --verbose \
             --max-turns 80 \
             --add-dir "${{ github.workspace }}" \
-            -p "$(cat /tmp/nf_agent/daily_task.md)"
+            -p "$(cat ${WORKSPACE_DIR}/daily_task.md)"
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           SYNAPSE_AUTH_TOKEN: ${{ secrets.SYNAPSE_AUTH_TOKEN }}
@@ -93,7 +107,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: agent-debug-${{ env.TODAY }}
-          path: /tmp/nf_agent/
+          path: ${{ env.WORKSPACE_DIR }}
           retention-days: 14
 
       - name: Open GitHub Issue on failure
@@ -108,12 +122,12 @@ jobs:
               repo: context.repo.repo,
               title: `[Agent Failure] Daily run failed on ${today}`,
               body: [
-                '## NF Data Contributor Agent — Run Failure',
+                '## NADIA — Run Failure',
                 '',
                 `**Date:** ${today}`,
                 `**Run:** ${runUrl}`,
                 '',
-                'The daily run failed. Check the run logs and the uploaded `/tmp/nf_agent/` artifact for debug information.',
+                'The daily run failed. Check the run logs and the uploaded agent workspace artifact for debug information.',
                 '',
                 'Common causes:',
                 '- Synapse auth token expired',
