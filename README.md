@@ -1,4 +1,4 @@
-# NADIA — Network-Agnostic Dataset Ingestion Agent
+# NADIA — Notable Asset Discovery, Indexing, and Annotation
 
 An autonomous data curation agent for Synapse-backed data portals. Configurable for any disease domain or research focus via `config/settings.yaml` and `config/keywords.yaml`.
 

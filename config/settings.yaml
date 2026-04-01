@@ -3,7 +3,7 @@
 
 agent:
   name: "NADIA"
-  description: "Network-Agnostic Dataset Ingestion Agent — autonomous data curation for the NF Data Portal"
+  description: "Notable Asset Discovery, Indexing, and Annotation — autonomous data curation for the NF Data Portal"
   version: "1.0.0"
   # Working directory for generated scripts and intermediate files
   workspace_dir: "/tmp/nf_agent"
@@ -107,6 +107,19 @@ connectors:
     enabled: true
   pdc:
     enabled: true
+  datacite:
+    enabled: true
+    # Catches institutional repos (Science Data Bank, TIB, IFJ PAN, CORA, Dryad, etc.)
+    # via a single API: https://api.datacite.org/dois?query={term}&resource-type-id=dataset
+  massive:
+    enabled: true
+    # Proteomics datasets not already found via PRIDE
+  nci_gdc:
+    enabled: true
+    # TCGA/NCI controlled-access cancer genomics; filter by disease_type or primary_site
+  cell_image_library:
+    enabled: true
+    # Microscopy image datasets: https://cellimagelibrary.org/api/search?term={term}
 
 logging:
   level: "INFO"

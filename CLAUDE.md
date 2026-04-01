@@ -1,4 +1,4 @@
-# NADIA — Network-Agnostic Dataset Ingestion Agent
+# NADIA — Notable Asset Discovery, Indexing, and Annotation
 
 You are an autonomous data curation agent. Your configuration lives in `config/settings.yaml` (agent identity, Synapse team, schema prefix, annotation vocabulary) and `config/keywords.yaml` (disease search terms and PubMed MeSH query). **Read both files at the start of every run** to obtain your operating parameters.
 
@@ -150,7 +150,8 @@ For each accession found → fetch metadata from source repository
 
 SECONDARY PATH — repository-direct (catches unpublished / preprint data)
 ─────────────────────────────────────────────────────────
-Zenodo, Figshare, OSF, ArrayExpress, PRIDE, MetaboLights, Mendeley Data, NCI PDC
+Zenodo, Figshare, OSF, ArrayExpress, PRIDE, MetaboLights, Mendeley Data, NCI PDC,
+DataCite API, MassIVE, NCI GDC, Cell Image Library
   → query with keywords from config/keywords.yaml
   → SKIP any result with a PMID already found in the primary path
 ```
@@ -264,6 +265,57 @@ def get_europepmc_accessions(pmid: str) -> list[dict]:
 Europe PMC provider → repository: `GEO` → GEO, `ENA`/`SRA` → SRA/ENA, `EGA` → EGA, `ArrayExpress` → ArrayExpress, `PRIDE` → PRIDE, `metabolights` → MetaboLights, `Zenodo` → Zenodo, `Figshare` → Figshare.
 
 **Never accept `S-EPMC*` accessions or `provider: EuropePMC` entries from the annotations API.** These are auto-generated BioStudies records holding journal supplementary files (PDFs, Word docs) — not research datasets.
+
+**DataCite API — institutional and national repository datasets:**
+```python
+import httpx, time
+
+def search_datacite(term: str, since_date: str, page_size: int = 50) -> list[dict]:
+    """Search DataCite for NF datasets from any repository not otherwise covered."""
+    results = []
+    for page in range(1, 4):  # max 3 pages = 150 results per term
+        resp = httpx.get(
+            'https://api.datacite.org/dois',
+            params={
+                'query': term,
+                'resource-type-id': 'dataset',
+                'registered': f'{since_date},',  # ISO date filter
+                'page[size]': page_size,
+                'page[number]': page,
+            },
+            timeout=30
+        )
+        if resp.status_code != 200:
+            break
+        data = resp.json()
+        items = data.get('data', [])
+        if not items:
+            break
+        for item in items:
+            attrs = item.get('attributes', {})
+            doi = attrs.get('doi', '')
+            # Skip S-EPMC (Europe PMC supplementary bundles) and known-covered repos
+            if doi.startswith('10.') and not attrs.get('doi', '').lower().startswith('s-epmc'):
+                publisher = attrs.get('publisher', '')
+                # Skip repos already covered by dedicated queries
+                SKIP_PUBLISHERS = {'Zenodo', 'figshare', 'OSF', 'PRIDE', 'ArrayExpress',
+                                   'MetaboLights', 'Dryad', 'Mendeley Data'}
+                if any(s.lower() in publisher.lower() for s in SKIP_PUBLISHERS):
+                    continue
+                title = (attrs.get('titles') or [{}])[0].get('title', '')
+                desc = (attrs.get('descriptions') or [{}])[0].get('description', '')
+                creators = [c.get('name', '') for c in attrs.get('creators', [])[:4]]
+                url = attrs.get('url', '')
+                results.append({
+                    'doi': doi, 'title': title, 'description': desc,
+                    'creators': creators, 'publisher': publisher, 'url': url,
+                    'source_repository': 'DataCite',
+                    'discovery_path': 'datacite_api',
+                })
+        time.sleep(0.5)
+    return results
+# Call once per NF search term from config/keywords.yaml
+```
 
 **CrossRef relations — publisher-linked data repos:**
 ```python
@@ -555,8 +607,15 @@ Format: `{prefix}:{accession_id}`. One entry per repository accession. Set as a 
 | Zenodo | `zenodo.record` | `zenodo.record:7012345` |
 | OSF | `osf` | `osf:abc12` |
 | NCI PDC | `pdc.study` | `pdc.study:PDC000123` |
+| Dryad | `dryad` | `dryad:dryad.abc123` |
+| Science Data Bank | `scidb` | `scidb:OA_0d24d3aa6238430a9f7ab564b36398d0` |
+| TIB (German Nat. Library) | `tib` | `tib:10.57702/4hwx66p6` |
+| Cell Image Library | `cil` | `cil:47049` |
+| NCI GDC | `gdc` | `gdc:TCGA-SARC` |
 
 Do NOT add `pubmed:{pmid}` — PubMed is not a data repository.
+
+**DataCite-indexed repos** (Science Data Bank, TIB, IFJ PAN, CORA, Iowa, Polish Academy, etc.) that lack a Bioregistry prefix: use `doi:{doi}` as the alternateDataRepository value.
 
 ```python
 REPO_TO_PREFIX = {
@@ -566,7 +625,9 @@ REPO_TO_PREFIX = {
     'PRIDE': 'pride.project', 'MassIVE': 'massive',
     'MetaboLights': 'metabolights', 'CELLxGENE': 'cellxgene.collection',
     'Zenodo': 'zenodo.record', 'OSF': 'osf', 'PDC': 'pdc.study',
-    'cBioPortal': 'cbioportal',
+    'cBioPortal': 'cbioportal', 'Dryad': 'dryad',
+    'Science Data Bank': 'scidb', 'TIB': 'tib',
+    'Cell Image Library': 'cil', 'NCI GDC': 'gdc',
 }
 
 alternate_data_repos = []
