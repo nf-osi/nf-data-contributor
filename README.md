@@ -32,15 +32,15 @@ flowchart TD
     subgraph SCORE["3 · Score & Normalize"]
         I --> J[Claude reasoning\nrelevance score 0–1\ndisease focus · assay · species]
         J -->|score < 0.70\nor review / meta-analysis| Z2([Log rejected_relevance])
-        J -->|score ≥ 0.70| K[Fetch NF schema enums\nSynapse REST API]
+        J -->|score ≥ 0.70| K[Fetch schema enums\nSynapse REST API]
         K --> L[Claude reasoning\nnormalize raw metadata\n→ valid schema enum values]
     end
 
     subgraph BUILD["4 · Build Synapse Project"]
         L --> M[Create Synapse project\nnamed after publication title]
-        M --> N[Create folders\nRaw Data · Source Metadata\n+ Processed Data for GEO RAW.tar]
+        M --> N[Create folders\nRaw Data · Source Metadata\n+ Processed Data]
         N --> O[Per accession:\nfiles folder inside Raw Data\nor Processed Data]
-        O --> P[Enumerate files\nENA FASTQ → SDL fallback\nGEO FTP · Zenodo · PRIDE etc.]
+        O --> P[Enumerate files\nGEO FTP · ENA · Zenodo · PRIDE etc.]
         P --> Q[File entities\npath= direct URL\nsynapseStore=False]
         Q --> R[Per-file annotations\nassay · species · diagnosis\nspecimenID · fileFormat · …]
         R --> S[Dataset entity\ndirect child of project\ncolumnIds = annotation fields]
@@ -56,11 +56,11 @@ flowchart TD
         W --> X[Create JIRA ticket\npending data manager review]
     end
 
-    style DISCOVER fill:#e8f4fd,stroke:#2196f3
-    style DEDUP   fill:#fff8e1,stroke:#ff9800
-    style SCORE   fill:#f3e5f5,stroke:#9c27b0
-    style BUILD   fill:#e8f5e9,stroke:#4caf50
-    style STATE   fill:#fce4ec,stroke:#e91e63
+    style DISCOVER fill:#1565c0,color:#fff,stroke:#1565c0
+    style DEDUP   fill:#e65100,color:#fff,stroke:#e65100
+    style SCORE   fill:#6a1b9a,color:#fff,stroke:#6a1b9a
+    style BUILD   fill:#1b5e20,color:#fff,stroke:#1b5e20
+    style STATE   fill:#880e4f,color:#fff,stroke:#880e4f
 ```
 
 ---
