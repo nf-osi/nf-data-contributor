@@ -15,7 +15,7 @@ flowchart TD
     A([NADIA\nDaily trigger\nGitHub Actions]) --> B
 
     subgraph DISCOVER["1 · Discovery"]
-        B[PubMed search\nNF/SWN MeSH + keywords\nlast 30 days] --> C[NCBI elink\npubmed → gds / sra / gap]
+        B[PubMed search\nMeSH + keywords\nlast 30 days] --> C[NCBI elink\npubmed → gds / sra / gap]
         B --> D[Europe PMC annotations\nfull-text accession mining]
         C --> E[Publication groups\nkeyed by PMID]
         D --> E
@@ -51,7 +51,7 @@ flowchart TD
     end
 
     subgraph STATE["5 · State & Notify"]
-        AA --> W[Update state table\n{prefix}_ProcessedStudies\nstatus = synapse_created]
+        AA --> W[Update state table\nProcessedStudies + RunLog\nstatus = synapse_created]
         H --> W
         W --> X[Create JIRA ticket\npending data manager review]
     end
