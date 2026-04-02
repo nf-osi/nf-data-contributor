@@ -207,7 +207,7 @@ def create_study_review_issue(
     manifestation=None,
     pmid=None,
     doi=None,
-    team_mention="nf-osi/dcc-team",
+    team_mention=None,  # kept for backwards compatibility, no longer used
 ):
     """Create (or update) a GitHub issue for study review. Returns issue URL."""
     issue_labels = ["study-review", "automated"]
@@ -230,9 +230,6 @@ def create_study_review_issue(
         pmid=pmid,
         doi=doi,
     )
-
-    # Add team mention at top
-    body = f"@{team_mention} — A new study has been auto-discovered and needs review.\n\n" + body
 
     issue = _github_request("POST", "issues", {
         "title": title,

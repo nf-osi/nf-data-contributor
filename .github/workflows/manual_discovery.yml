@@ -10,12 +10,12 @@ name: NADIA — Manual Discovery
 
 on:
   issues:
-    types: [opened]
+    types: [labeled]
 
 jobs:
   discover:
-    # Only run for issues with the manual-discovery label
-    if: contains(github.event.issue.labels.*.name, 'manual-discovery')
+    # Only run when the manual-discovery label is applied
+    if: github.event.label.name == 'manual-discovery'
     runs-on: ubuntu-latest
     timeout-minutes: 180
 
