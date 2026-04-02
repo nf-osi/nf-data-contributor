@@ -95,9 +95,9 @@ pathlib.Path(workspace_dir + '/daily_task.md').write_text(t)
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           SYNAPSE_AUTH_TOKEN: ${{ secrets.SYNAPSE_AUTH_TOKEN }}
           NCBI_API_KEY: ${{ secrets.NCBI_API_KEY }}
-          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
-          JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
-          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          # GitHub token for filing study-review issues
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
           STATE_PROJECT_ID: ${{ vars.STATE_PROJECT_ID }}
           # Provide repo root so agent scripts can find lib/
           AGENT_REPO_ROOT: ${{ github.workspace }}

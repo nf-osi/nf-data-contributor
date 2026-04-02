@@ -100,11 +100,11 @@ Repositories to query:
 - ArrayExpress/BioStudies (`https://www.ebi.ac.uk/biostudies/api/v1/search`)
 - PRIDE (`https://www.ebi.ac.uk/pride/ws/archive/v2/projects`)
 - MetaboLights (`https://www.ebi.ac.uk/metabolights/ws`)
-- NCI PDC (GraphQL — filter for NF disease types)
+- NCI PDC (GraphQL — filter for disease types from `config/keywords.yaml`)
 - **DataCite API** (`https://api.datacite.org/dois?query={term}&resource-type-id=dataset&page[size]=50`) — catches institutional and national repos not otherwise queryable (Science Data Bank, TIB, IFJ PAN, CORA, Dryad, University institutional repos, etc.). Filter `S-EPMC*` accessions as always.
 - **MassIVE** (`https://massive.ucsd.edu/ProteoSAFe/QueryDatasets?query={term}`) — proteomics datasets not already found via PRIDE
-- **NCI GDC** (`https://api.gdc.cancer.gov/cases?filters=...`) — filter for `disease_type: Nerve Sheath Tumors` or `primary_site: Peripheral Nerves And Autonomic Nervous System`
-- **Cell Image Library** (`https://cellimagelibrary.org/api/search?term={term}`) — NF microscopy image datasets
+- **NCI GDC** (`https://api.gdc.cancer.gov/cases?filters=...`) — filter by disease type and primary site from `config/keywords.yaml`
+- **Cell Image Library** (`https://cellimagelibrary.org/api/search?term={term}`) — microscopy image datasets
 
 For unpublished results, create publication groups with `pmid: null`, using the repository title as the publication title.
 

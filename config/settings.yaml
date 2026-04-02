@@ -76,13 +76,16 @@ annotations:
     - "Pain"
 
 notifications:
-  jira:
+  github:
     enabled: true
-    project_key: "NFOSI"
-    issue_type: "Task"
-    assignee_email: "nf-osi@sagebionetworks.org"
-    # Summary template for new study tickets
-    summary_template: "Review auto-discovered study: {study_name} ({repository}:{accession_id})"
+    # GitHub org/team to mention on new study review issues (gets notified)
+    # Format: org/team-slug — must be a team within the repo's org
+    team_mention: "nf-osi/dcc-team"
+    # Labels automatically applied to new study-review issues
+    # 'approved' label triggers the provision_study.yml workflow
+    labels:
+      new_study: ["study-review", "automated"]
+      dataset_added: ["study-review", "dataset-added", "automated"]
 
 connectors:
   pubmed_geo:

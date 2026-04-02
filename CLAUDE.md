@@ -33,7 +33,7 @@ If a repository API returns an error or empty results, record the failure and mo
 **Rule 6 — Maximum 50 Synapse write operations (new projects + dataset additions) per run.**
 Stop when the counter reaches 50.
 
-**Rule 7 — Log all JIRA tickets to the run log before the job exits.**
+**Rule 7 — Log all GitHub issue URLs to the run log before the job exits.**
 
 ---
 
@@ -44,9 +44,8 @@ Stop when the counter reaches 50.
 | `SYNAPSE_AUTH_TOKEN` | Authenticates the Synapse service account. Scoped write access. |
 | `ANTHROPIC_API_KEY` | Authenticates the `claude` CLI process itself. Do NOT use inside generated Python scripts — scoring and normalization are done via agent reasoning, not nested API calls. |
 | `NCBI_API_KEY` | Increases NCBI Entrez rate limit from 3 to 10 req/s |
-| `JIRA_BASE_URL` | e.g. `https://sagebionetworks.jira.com` |
-| `JIRA_USER_EMAIL` | Service account email for JIRA auth |
-| `JIRA_API_TOKEN` | JIRA API token |
+| `GITHUB_TOKEN` | GitHub Actions token — used to create study-review issues (automatically set in Actions) |
+| `GITHUB_REPOSITORY` | `owner/repo` — automatically set in GitHub Actions |
 | `STATE_PROJECT_ID` | Synapse project ID for the agent's own state tables |
 
 ---
@@ -271,7 +270,7 @@ Europe PMC provider → repository: `GEO` → GEO, `ENA`/`SRA` → SRA/ENA, `EGA
 import httpx, time
 
 def search_datacite(term: str, since_date: str, page_size: int = 50) -> list[dict]:
-    """Search DataCite for NF datasets from any repository not otherwise covered."""
+    """Search DataCite for disease-relevant datasets from any repository not otherwise covered."""
     results = []
     for page in range(1, 4):  # max 3 pages = 150 results per term
         resp = httpx.get(
@@ -314,7 +313,7 @@ def search_datacite(term: str, since_date: str, page_size: int = 50) -> list[dic
                 })
         time.sleep(0.5)
     return results
-# Call once per NF search term from config/keywords.yaml
+# Call once per search term from config/keywords.yaml
 ```
 
 **CrossRef relations — publisher-linked data repos:**
@@ -663,67 +662,63 @@ Do this immediately after storing the project entity.
 
 ---
 
-## JIRA Notification Pattern
+## GitHub Issue Notification Pattern
 
-**CRITICAL: Always use ADF (Atlassian Document Format) for the `description` field — never a plain string with `\n` escapes.** The MCP tool and Jira REST API both double-escape `\n` in plain strings, producing literal `\\n` in the ticket. ADF uses structured paragraph objects and renders correctly.
+After successfully creating or updating a Synapse project, file a GitHub issue for data manager review. Use the `scripts/github_issue.py` helper — **do not call the GitHub API directly**.
 
 ```python
-import httpx, os
+import subprocess, json, os, sys
 
-def make_adf_para(text):
-    return {'type': 'paragraph', 'content': [{'type': 'text', 'text': text}]}
+# Read team mention from config
+gh_cfg = cfg.get('notifications', {}).get('github', {})
+team_mention = gh_cfg.get('team_mention', 'nf-osi/dcc-team')
 
-def make_adf_para_bold(label, value):
-    return {'type': 'paragraph', 'content': [
-        {'type': 'text', 'text': label, 'marks': [{'type': 'strong'}]},
-        {'type': 'text', 'text': value},
-    ]}
+cmd = [
+    sys.executable, 'scripts/github_issue.py',
+    '--synapse-project-id', synapse_project_id,
+    '--study-name',         project_name,
+    '--accessions',         *alternate_repos,   # list of "prefix:accession" strings
+    '--study-leads',        *study_leads,
+    '--assay-types',        *assay_types,       # list of strings
+    '--file-count',         str(total_file_count),
+    '--outcome',            'new',              # or 'added' for dataset additions
+    '--disease-focus',      *disease_focus_vals,
+    '--manifestation',      *manifestation_vals,
+    '--team-mention',       team_mention,
+]
+if pmid:
+    cmd += ['--pmid', pmid]
+if doi:
+    cmd += ['--doi', doi]
 
-def make_adf_bullet(items):
-    return {'type': 'bulletList', 'content': [
-        {'type': 'listItem', 'content': [make_adf_para(item)]}
-        for item in items
-    ]}
-
-base_url = os.environ.get('JIRA_BASE_URL', '').rstrip('/')
-email = os.environ.get('JIRA_USER_EMAIL', '')
-token = os.environ.get('JIRA_API_TOKEN', '')
-
-if base_url and email and token:
-    synapse_url = f'https://www.synapse.org/#!Synapse:{synapse_project_id}'
-    adf_description = {
-        'type': 'doc', 'version': 1,
-        'content': [
-            make_adf_para('A new study has been auto-discovered and provisioned in Synapse for data manager review.'),
-            make_adf_para_bold('Synapse Project: ', synapse_url),
-            make_adf_para_bold('Study: ', project_name),
-            make_adf_para_bold('External Accessions: ', ', '.join(alternate_repos)),
-            make_adf_para_bold('Study Leads: ', ', '.join(study_leads)),
-            make_adf_para('Data Summary:'),
-            make_adf_bullet(data_summary_bullets),   # list of strings
-            make_adf_para_bold('Audit: ', audit_summary),
-        ]
-    }
-    import yaml
-    with open('config/settings.yaml') as f:
-        cfg = yaml.safe_load(f)
-    jira_cfg = cfg['notifications']['jira']
-    payload = {
-        'fields': {
-            'project': {'key': jira_cfg['project_key']},
-            'summary': f'Review auto-discovered study: {project_name}'[:254],
-            'description': adf_description,
-            'issuetype': {'name': jira_cfg.get('issue_type', 'Task')},
-        }
-    }
-    resp = httpx.post(f'{base_url}/rest/api/3/issue', json=payload, auth=(email, token))
-    if resp.status_code not in (200, 201):
-        print(f"  JIRA warning: {resp.status_code} {resp.text[:200]}")
+result = subprocess.run(cmd, capture_output=True, text=True)
+if result.returncode == 0:
+    lines = [l for l in result.stdout.strip().splitlines() if l.startswith('{')]
+    if lines:
+        issue_data = json.loads(lines[-1])
+        issue_url = issue_data.get('issue_url', '')
+        print(f"  GitHub issue: {issue_url}")
     else:
-        print(f"  JIRA ticket: {resp.json().get('key')}")
+        print(f"  GitHub issue created")
+else:
+    print(f"  GitHub issue warning: {result.stderr[:200]}")
+    # Non-fatal — continue
 ```
 
-On 401/placeholder errors: log as warnings and continue — don't stop the run.
+The `GITHUB_TOKEN` and `GITHUB_REPOSITORY` environment variables are automatically set in GitHub Actions. On errors, log a warning and continue — do not stop the run.
+
+### Review → Provisioning flow
+
+1. **NADIA creates issue** tagged `study-review` + mentions `@nf-osi/dcc-team`
+2. **Data manager reviews** and optionally comments:
+   - `/nadia status` — get current annotation health report (code-only)
+   - `/nadia fix: <description>` — request an annotation change (triggers Claude Code)
+3. **Data manager approves** by applying the `approved` label
+4. **`provision_study.yml` runs automatically** (code-only, no LLM):
+   - Sets `resourceStatus = approved` on project + all files + dataset entities
+   - Adds project to portal FileView scope (`files_table_id` from config)
+   - Updates NADIA state table to `status = approved`
+   - Posts completion comment and closes the issue
 
 ---
 
