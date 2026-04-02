@@ -18,7 +18,6 @@ import argparse
 import json
 import os
 import sys
-import textwrap
 import urllib.request
 import urllib.error
 
@@ -133,80 +132,67 @@ def build_issue_body(
         "doi": doi or "",
     }
 
-    body = textwrap.dedent(f"""\
-        ## NADIA Study Review
+    metadata_json = json.dumps(metadata, indent=2, ensure_ascii=False)
 
-        {outcome_label}
-
-        | Field | Value |
-        |-------|-------|
-        | **Synapse Project** | [{synapse_project_id}]({synapse_url}) |
-        | **Study Name** | {study_name} |
-        | **External Accessions** | {acc_str} |
-        | **Study Leads** | {leads_str} |
-        | **Assay Types** | {assay_str} |
-        | **Disease Focus** | {df_str} |
-        | **Manifestation** | {mfst_str} |
-        | **File Count** | {file_count:,} |
-        | **PMID** | {pmid or "—"} |
-        | **DOI** | {doi or "—"} |
-
-        ---
-
-        ## Review Checklist
-
-        Please check each item before approving:
-
-        - [ ] Study name is accurate and meaningful
-        - [ ] Correct disease focus and manifestation values
-        - [ ] Study leads (first + last/corresponding author) are correct
-        - [ ] Assay type(s) are correct
-        - [ ] File annotations look reasonable (spot-check a few files)
-        - [ ] Wiki summary is informative
-        - [ ] `resourceStatus` should be set to `approved` after review
-        - [ ] No sensitive or controlled-access data exposed unintentionally
-
-        ---
-
-        ## Actions
-
-        **To request annotation fixes**, comment with:
-        ```
-        /nadia fix: <describe what needs to be changed>
-        ```
-        Examples:
-        - `/nadia fix: disease focus should be NF2 not NF1`
-        - `/nadia fix: manifestation is missing — this is a plexiform neurofibroma study`
-        - `/nadia fix: study lead should be Jane Doe, not John Smith`
-
-        **To recheck the project status**, comment with:
-        ```
-        /nadia status
-        ```
-
-        **To approve and trigger portal provisioning**, apply the `approved` label to this issue.
-        This will automatically:
-        1. Set `resourceStatus = approved` on the Synapse project and all files
-        2. Add the project to the portal file view
-        3. Update the NADIA state table
-        4. Post a summary comment here
-
-        > ⚠️  Only apply `approved` when the study is ready for the public portal.
-        > Once provisioned, changes require manual curator action in Synapse.
-
-        ---
-
-        <details>
-        <summary>🔧 NADIA Metadata (used by automated provisioning — do not edit)</summary>
-
-        ```json
-        NADIA_METADATA_JSON
-        {json.dumps(metadata, indent=2, ensure_ascii=False)}
-        NADIA_METADATA_JSON
-        ```
-
-        </details>
-    """)
+    parts = [
+        "## NADIA Study Review\n",
+        f"{outcome_label}\n",
+        "| Field | Value |",
+        "|-------|-------|",
+        f"| **Synapse Project** | [{synapse_project_id}]({synapse_url}) |",
+        f"| **Study Name** | {study_name} |",
+        f"| **External Accessions** | {acc_str} |",
+        f"| **Study Leads** | {leads_str} |",
+        f"| **Assay Types** | {assay_str} |",
+        f"| **Disease Focus** | {df_str} |",
+        f"| **Manifestation** | {mfst_str} |",
+        f"| **File Count** | {file_count:,} |",
+        f"| **PMID** | {pmid or '—'} |",
+        f"| **DOI** | {doi or '—'} |",
+        "\n---\n",
+        "## Review Checklist\n",
+        "Please check each item before approving:\n",
+        "- [ ] Study name is accurate and meaningful",
+        "- [ ] Correct disease focus and manifestation values",
+        "- [ ] Study leads (first + last/corresponding author) are correct",
+        "- [ ] Assay type(s) are correct",
+        "- [ ] File annotations look reasonable (spot-check a few files)",
+        "- [ ] Wiki summary is informative",
+        "- [ ] `resourceStatus` should be set to `approved` after review",
+        "- [ ] No sensitive or controlled-access data exposed unintentionally",
+        "\n---\n",
+        "## Actions\n",
+        "**To request annotation fixes**, comment with:",
+        "```",
+        "/nadia fix: <describe what needs to be changed>",
+        "```",
+        "Examples:",
+        "- `/nadia fix: disease focus should be NF2 not NF1`",
+        "- `/nadia fix: manifestation is missing — this is a plexiform neurofibroma study`",
+        "- `/nadia fix: study lead should be Jane Doe, not John Smith`\n",
+        "**To recheck the project status**, comment with:",
+        "```",
+        "/nadia status",
+        "```\n",
+        "**To approve and trigger portal provisioning**, apply the `approved` label to this issue.",
+        "This will automatically:",
+        "1. Set `resourceStatus = approved` on the Synapse project and all files",
+        "2. Add the project to the portal file view",
+        "3. Update the NADIA state table",
+        "4. Post a summary comment here\n",
+        "> ⚠️  Only apply `approved` when the study is ready for the public portal.",
+        "> Once provisioned, changes require manual curator action in Synapse.",
+        "\n---\n",
+        "<details>",
+        "<summary>🔧 NADIA Metadata (used by automated provisioning — do not edit)</summary>\n",
+        "```json",
+        "NADIA_METADATA_JSON",
+        metadata_json,
+        "NADIA_METADATA_JSON",
+        "```\n",
+        "</details>",
+    ]
+    body = "\n".join(parts)
     return body
 
 
