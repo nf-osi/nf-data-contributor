@@ -5,7 +5,7 @@ Triggered by the `provision_study.yml` GitHub Actions workflow when a data manag
 applies the `approved` label to a study-review issue.
 
 Two Synapse clients are used:
-  - syn_portal (PORTAL_SYNAPSE_AUTH_TOKEN): has write access to portal assets and admin
+  - syn_portal (SERVICE_TOKEN): has write access to portal assets and admin
     rights on NADIA-created projects (via team membership). Used for steps 1–4.
   - syn_nadia  (SYNAPSE_AUTH_TOKEN): NADIA service account that owns the state tables.
     Used for step 5 only.
@@ -54,9 +54,9 @@ def load_config():
 
 def get_portal_client():
     """Synapse client using the portal service account (write access to portal assets)."""
-    token = os.environ.get("PORTAL_SYNAPSE_AUTH_TOKEN", "")
+    token = os.environ.get("SERVICE_TOKEN", "")
     if not token:
-        raise RuntimeError("PORTAL_SYNAPSE_AUTH_TOKEN not set")
+        raise RuntimeError("SERVICE_TOKEN not set")
     return synapseclient.login(authToken=token, silent=True)
 
 
