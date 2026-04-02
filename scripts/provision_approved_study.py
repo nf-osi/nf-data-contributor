@@ -19,8 +19,10 @@ Steps performed (all code, no LLM):
   5. Populate study long-text table (long_text_table_id) with standard access requirements
      and acknowledgement statements
   6. Upsert publication record into portal publications table (publications_table_id)
-  7. Update NADIA state table (NF_DataContributor_ProcessedStudies) → status = 'approved'
-  8. Post a summary comment on the GitHub issue and close the issue
+     — fetches full author list, journal, and year from PubMed via NCBI efetch
+  7. Add project's Dataset entities to portal DatasetCollection (dataset_collection_id)
+  8. Update NADIA state table (NF_DataContributor_ProcessedStudies) → status = 'approved'
+  9. Post a summary comment on the GitHub issue and close the issue
 
 Usage:
     python scripts/provision_approved_study.py --issue-number 42
@@ -302,10 +304,82 @@ def step4_upsert_long_text(syn, project_id, metadata, long_text_table_id):
         return False
 
 
+def _fetch_pubmed_details(pmid):
+    """
+    Fetch full publication metadata from PubMed for a given PMID.
+    Returns a dict with keys: title, year, journal, authors (full list), doi.
+    Falls back gracefully on any error.
+    """
+    try:
+        import urllib.request as _req
+        import xml.etree.ElementTree as ET
+
+        url = (
+            f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
+            f"?db=pubmed&id={pmid}&rettype=xml&retmode=xml"
+        )
+        ncbi_key = os.environ.get("NCBI_API_KEY", "")
+        if ncbi_key:
+            url += f"&api_key={ncbi_key}"
+
+        with _req.urlopen(url, timeout=20) as resp:
+            xml_bytes = resp.read()
+
+        root = ET.fromstring(xml_bytes)
+        article = root.find(".//MedlineCitation/Article")
+        if article is None:
+            return {}
+
+        # Title
+        title_el = article.find("ArticleTitle")
+        title = "".join(title_el.itertext()) if title_el is not None else ""
+
+        # Journal
+        journal_el = article.find("Journal/Title")
+        journal = journal_el.text if journal_el is not None else ""
+
+        # Year
+        year = None
+        pub_date = article.find("Journal/JournalIssue/PubDate")
+        if pub_date is not None:
+            yr_el = pub_date.find("Year")
+            if yr_el is not None:
+                try:
+                    year = int(yr_el.text or "")
+                except (ValueError, TypeError):
+                    pass
+
+        # Authors — full list
+        authors = []
+        for author in article.findall("AuthorList/Author"):
+            last     = author.findtext("LastName", "")
+            initials = author.findtext("Initials", "")
+            if last:
+                # "Smith J" format used by portal
+                name = f"{last} {initials}" if initials else last
+                authors.append(name)
+
+        # DOI from ArticleIdList
+        doi = ""
+        for aid in root.findall(".//PubmedData/ArticleIdList/ArticleId"):
+            if aid.get("IdType") == "doi":
+                doi = aid.text or ""
+                break
+
+        return {"title": title, "year": year, "journal": journal,
+                "authors": authors, "doi": doi}
+
+    except Exception as e:
+        print(f"  WARN: PubMed fetch for PMID {pmid} failed: {e}", file=sys.stderr)
+        return {}
+
+
 def step5_upsert_publication(syn, project_id, metadata, publications_table_id):
     """
     Insert a row into the Portal Publications table (syn16857542) if the
     publication (matched by PMID or DOI) is not already present.
+
+    Fetches full author list, journal, and year from PubMed when a PMID is available.
 
     Columns: doi, diseaseFocus, journal, title, year, pmid (prefix 'PMID:'),
              author (STRING_LIST), manifestation (STRING_LIST),
@@ -314,10 +388,10 @@ def step5_upsert_publication(syn, project_id, metadata, publications_table_id):
     import datetime
     import pandas as pd
 
-    pmid         = metadata.get("pmid", "")
-    doi          = metadata.get("doi", "")
-    study_name   = metadata.get("study_name", "")
-    study_leads  = metadata.get("study_leads", [])
+    pmid          = metadata.get("pmid", "")
+    doi           = metadata.get("doi", "")
+    study_name    = metadata.get("study_name", "")
+    study_leads   = metadata.get("study_leads", [])   # fallback if PubMed unavailable
     disease_focus = metadata.get("disease_focus", [])
     manifestation = metadata.get("manifestation", [])
 
@@ -347,30 +421,38 @@ def step5_upsert_publication(syn, project_id, metadata, publications_table_id):
                 existing = df_check
 
         if existing is not None and not existing.empty:
-            print(f"  Publication already in portal publications table — skipping insert")
+            print("  Publication already in portal publications table — skipping insert")
             return True
 
-        # Insert new publication row
-        current_year = datetime.date.today().year
+        # Enrich from PubMed if PMID available
+        pub_details = _fetch_pubmed_details(pmid) if pmid else {}
+
+        title   = pub_details.get("title") or study_name
+        year    = pub_details.get("year") or datetime.date.today().year
+        journal = pub_details.get("journal") or None
+        authors = pub_details.get("authors") or study_leads or None
+        doi     = pub_details.get("doi") or doi or None
         disease_focus_val = disease_focus[0] if disease_focus else None
 
         new_row = {
-            "title":        study_name,
-            "pmid":         pmid_formatted or None,
-            "doi":          doi or None,
-            "year":         current_year,
-            "author":       study_leads if study_leads else None,
-            "diseaseFocus": disease_focus_val,
+            "title":         title,
+            "pmid":          pmid_formatted or None,
+            "doi":           doi,
+            "year":          year,
+            "author":        authors,
+            "journal":       journal,
+            "diseaseFocus":  disease_focus_val,
             "manifestation": manifestation if manifestation else None,
-            "studyId":      [project_id],
-            "studyName":    [study_name[:200]] if study_name else None,
-            "journal":      None,
+            "studyId":       [project_id],
+            "studyName":     [study_name[:200]] if study_name else None,
             "fundingAgency": None,
         }
 
         df_new = pd.DataFrame([new_row])
         syn.store(synapseclient.Table(publications_table_id, df_new))
-        print(f"  Inserted publication row for '{study_name[:80]}...'")
+        n_authors = len(authors) if authors else 0
+        print(f"  Inserted publication: '{title[:80]}' "
+              f"({year}, {journal or 'journal unknown'}, {n_authors} authors)")
         return True
 
     except Exception as e:
@@ -378,7 +460,57 @@ def step5_upsert_publication(syn, project_id, metadata, publications_table_id):
         return False
 
 
-def step6_update_state_table(syn, cfg, project_id):
+def step6_add_to_dataset_collection(syn, project_id, collection_id):
+    """
+    Add each Dataset entity in the project to the portal DatasetCollection
+    (dataset_collection_id in config).
+
+    The DatasetCollection uses optimistic concurrency: GET to read current etag
+    + items, append new items, then PUT back. Each item is
+    {"entityId": "syn...", "versionNumber": N} where N is the dataset's current
+    stable version.
+    """
+    try:
+        # Find Dataset entities that are direct children of the project
+        datasets = get_children_rest(syn, project_id, types=["dataset"])
+        if not datasets:
+            print(f"  No Dataset entities found in {project_id} — skipping")
+            return True
+
+        # GET current DatasetCollection (need etag + existing items)
+        collection = syn.restGET(f"/entity/{collection_id}")
+        existing_ids = {item["entityId"] for item in collection.get("items", [])}
+        items = list(collection.get("items", []))
+
+        added = 0
+        for ds in datasets:
+            ds_id = ds["id"]
+            if ds_id in existing_ids:
+                print(f"  Dataset {ds_id} already in collection — skipping")
+                continue
+            # Get current version number
+            ds_entity = syn.restGET(f"/entity/{ds_id}")
+            version = ds_entity.get("versionNumber", 1)
+            items.append({"entityId": ds_id, "versionNumber": version})
+            added += 1
+            print(f"  Queued {ds_id} (version {version}) for collection")
+
+        if added == 0:
+            return True
+
+        # PUT updated collection back (etag required for optimistic concurrency)
+        collection["items"] = items
+        syn.restPUT(f"/entity/{collection_id}", json.dumps(collection))
+        print(f"  Added {added} dataset(s) to DatasetCollection {collection_id} "
+              f"({len(items)} total)")
+        return True
+
+    except Exception as e:
+        print(f"  WARN: dataset collection update failed: {e}", file=sys.stderr)
+        return False
+
+
+def step7_update_state_table(syn, cfg, project_id):
     """Update NADIA state table rows for this project to status='approved'."""
     try:
         state_project_id = os.environ.get("STATE_PROJECT_ID", "")
@@ -417,7 +549,8 @@ def step6_update_state_table(syn, cfg, project_id):
 
 def post_success_comment(issue_number, project_id, stats,
                          studies_view_added, files_view_added,
-                         long_text_updated, pub_upserted, state_updated):
+                         long_text_updated, pub_upserted,
+                         collection_updated, state_updated):
     synapse_url = f"https://www.synapse.org/Synapse:{project_id}"
 
     def status_icon(ok):
@@ -433,6 +566,7 @@ def post_success_comment(issue_number, project_id, stats,
         f"| Added to portal Files FileView | {status_icon(files_view_added)} |",
         f"| Study long-text populated | {status_icon(long_text_updated)} |",
         f"| Publication record upserted | {status_icon(pub_upserted)} |",
+        f"| Added to Dataset Collection | {status_icon(collection_updated)} |",
         f"| NADIA state table updated | {status_icon(state_updated)} |",
         f"| Errors | {'⚠️ ' + str(stats['errors']) if stats['errors'] else '✅ None'} |",
         "",
@@ -483,10 +617,11 @@ def main():
 
     cfg = load_config()
     dedup = cfg["deduplication"]
-    studies_source_view_id = dedup["studies_source_view_id"]
-    files_table_id         = dedup["files_table_id"]
-    long_text_table_id     = dedup["long_text_table_id"]
-    publications_table_id  = dedup["publications_table_id"]
+    studies_source_view_id  = dedup["studies_source_view_id"]
+    files_table_id          = dedup["files_table_id"]
+    long_text_table_id      = dedup["long_text_table_id"]
+    publications_table_id   = dedup["publications_table_id"]
+    dataset_collection_id   = dedup["dataset_collection_id"]
 
     # Two Synapse clients: portal token for portal assets, NADIA token for state tables
     print("Connecting to Synapse (portal account)...")
@@ -543,20 +678,27 @@ def main():
     print(f"\nStep 5: Upserting publication record ({publications_table_id})...")
     pub_upserted = step5_upsert_publication(syn_portal, project_id, metadata, publications_table_id)
 
-    # Step 6 — Update NADIA state table
-    print("\nStep 6: Updating NADIA state table...")
+    # Step 6 — Add datasets to portal DatasetCollection
+    print(f"\nStep 6: Adding datasets to DatasetCollection ({dataset_collection_id})...")
+    collection_updated = step6_add_to_dataset_collection(
+        syn_portal, project_id, dataset_collection_id
+    )
+
+    # Step 7 — Update NADIA state table
+    print("\nStep 7: Updating NADIA state table...")
     if syn_nadia:
-        state_updated = step6_update_state_table(syn_nadia, cfg, project_id)
+        state_updated = step7_update_state_table(syn_nadia, cfg, project_id)
     else:
         state_updated = False
         print("  Skipped (SYNAPSE_AUTH_TOKEN not available)")
 
-    # Step 7 — Post completion comment and close issue
-    print("\nStep 7: Posting completion comment and closing issue...")
+    # Step 8 — Post completion comment and close issue
+    print("\nStep 8: Posting completion comment and closing issue...")
     post_success_comment(
         issue_number, project_id, stats,
         studies_view_added, files_view_added,
-        long_text_updated, pub_upserted, state_updated,
+        long_text_updated, pub_upserted,
+        collection_updated, state_updated,
     )
 
     print("\nProvisioning complete.", flush=True)

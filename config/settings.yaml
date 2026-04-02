@@ -39,6 +39,7 @@ deduplication:
   files_table_id: "syn16858331"          # Files FileView — scopeIds are numeric (no 'syn' prefix)
   long_text_table_id: "syn16787123"      # Study long-text (summary, accessRequirements, acknowledgementStatements)
   publications_table_id: "syn16857542"   # Portal publications table
+  dataset_collection_id: "syn50913342"   # Portal Dataset Collection — DatasetCollection entity
   # datasets_table_id "syn16859580" removed — entity does not exist (404)
   # TF-IDF cosine similarity threshold for fuzzy title matching
   fuzzy_title_threshold: 0.85
