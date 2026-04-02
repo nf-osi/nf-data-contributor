@@ -90,12 +90,12 @@ def get_issue_body(issue_number):
 def parse_nadia_metadata(issue_body):
     """Extract the embedded JSON metadata block from the issue body."""
     m = re.search(
-        r'<!--\s*NADIA_METADATA_JSON\s*(.*?)\s*NADIA_METADATA_JSON\s*-->',
+        r'NADIA_METADATA_JSON\s*(.*?)\s*NADIA_METADATA_JSON',
         issue_body, re.DOTALL
     )
     if not m:
         raise ValueError("Could not find NADIA_METADATA_JSON block in issue body")
-    return json.loads(m.group(1))
+    return json.loads(m.group(1).strip())
 
 
 def get_children_rest(syn, parent_id, types=None):

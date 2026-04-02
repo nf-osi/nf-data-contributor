@@ -233,6 +233,20 @@ def main():
     # Get issue body and extract project ID
     issue = github_request("GET", f"issues/{args.issue_number}")
     body  = issue.get("body", "")
+    m = re.search(r'NADIA_METADATA_JSON\s*(.*?)\s*NADIA_METADATA_JSON', body, re.DOTALL)
+    if m:
+        try:
+            meta = json.loads(m.group(1).strip())
+            project_id = meta.get("synapse_project_id", "")
+            if project_id:
+                print(f"Checking status of {project_id}...")
+                status  = check_project(syn, project_id)
+                comment = format_status_comment(status)
+                github_request("POST", f"issues/{args.issue_number}/comments", {"body": comment})
+                print("Status comment posted.")
+                return
+        except Exception:
+            pass
     m     = re.search(r'"synapse_project_id":\s*"(syn\d+)"', body)
     if not m:
         print("ERROR: Could not find Synapse project ID in issue body", file=sys.stderr)

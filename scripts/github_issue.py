@@ -196,9 +196,16 @@ def build_issue_body(
 
         ---
 
-        <!-- NADIA_METADATA_JSON
-        {json.dumps(metadata, indent=2)}
-        NADIA_METADATA_JSON -->
+        <details>
+        <summary>🔧 NADIA Metadata (used by automated provisioning — do not edit)</summary>
+
+        ```json
+        NADIA_METADATA_JSON
+        {json.dumps(metadata, indent=2, ensure_ascii=False)}
+        NADIA_METADATA_JSON
+        ```
+
+        </details>
     """)
     return body
 
