@@ -111,10 +111,10 @@ jobs:
       - name: Run Claude Code fix
         if: steps.parse.outputs.command == 'fix'
         env:
-          # Pass user-controlled values through env vars to avoid shell injection
           NADIA_ISSUE_NUMBER: ${{ github.event.issue.number }}
           NADIA_FIX_DESCRIPTION: ${{ steps.parse.outputs.args }}
           NADIA_ISSUE_BODY: ${{ github.event.issue.body }}
+          NADIA_WORKSPACE_DIR: /tmp/nf_agent
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           SYNAPSE_AUTH_TOKEN: ${{ secrets.SYNAPSE_AUTH_TOKEN }}
           NCBI_API_KEY: ${{ secrets.NCBI_API_KEY }}
@@ -123,55 +123,14 @@ jobs:
           STATE_PROJECT_ID: ${{ vars.STATE_PROJECT_ID }}
           AGENT_REPO_ROOT: ${{ github.workspace }}
         run: |
-          # Extract Synapse project ID safely via Python reading env var
-          SYNAPSE_ID=$(python3 - <<'PYEOF'
-import re, os
-body = os.environ.get('NADIA_ISSUE_BODY', '')
-m = re.search(r'"synapse_project_id":\s*"(syn\d+)"', body)
-print(m.group(1) if m else '')
-PYEOF
-)
-          if [ -z "$SYNAPSE_ID" ]; then
-            echo "Could not extract Synapse project ID from issue body" >&2
-            exit 1
-          fi
-
-          WORKSPACE_DIR=$(python3 -c "import yaml; cfg=yaml.safe_load(open('config/settings.yaml')); print(cfg['agent']['workspace_dir'])")
-          mkdir -p "${WORKSPACE_DIR}"
-
-          # Write prompt to a file to avoid any shell quoting issues
-          python3 - <<PYEOF
-import os
-issue_number    = os.environ['NADIA_ISSUE_NUMBER']
-fix_description = os.environ['NADIA_FIX_DESCRIPTION']
-synapse_id      = '${SYNAPSE_ID}'
-workspace_dir   = '${WORKSPACE_DIR}'
-prompt = f"""A data manager has requested a fix to a NADIA Synapse project via GitHub issue #{issue_number}.
-
-Synapse project: {synapse_id}
-Fix requested: {fix_description}
-
-Steps:
-1. Read CLAUDE.md for safety rules and context.
-2. Check the current state of the project annotations in Synapse (read project annotations, sample a few files, check dataset entities).
-3. Apply the requested fix (update annotations, rename entities, etc. as needed). Follow all NADIA safety rules.
-4. Verify the fix was applied correctly.
-5. Post a GitHub comment on issue #{issue_number} summarising what was changed. Use scripts/github_issue.py post_issue_comment(), or POST directly to the GitHub API.
-
-Work in {workspace_dir}. Do not modify CLAUDE.md, lib/, config/, or prompts/.
-"""
-with open(workspace_dir + '/nadia_fix_prompt.md', 'w') as f:
-    f.write(prompt)
-print(prompt[:200])
-PYEOF
-
+          python3 scripts/nadia_fix_prep.py
           claude \
             --permission-mode bypassPermissions \
             --output-format stream-json \
             --verbose \
             --max-turns 40 \
-            --add-dir "${{ github.workspace }}" \
-            -p "$(cat ${WORKSPACE_DIR}/nadia_fix_prompt.md)"
+            --add-dir "$AGENT_REPO_ROOT" \
+            -p "$(cat /tmp/nf_agent/nadia_fix_prompt.md)"
 
       # ── Unknown command ─────────────────────────────────────────────────────
       - name: Respond to unknown command
