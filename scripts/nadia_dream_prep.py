@@ -92,43 +92,6 @@ def collect_fix_commands(lookback_days=7):
     return fix_commands
 
 
-def summarise_fix_commands(fix_commands):
-    """
-    Group fix commands by rough theme using keyword matching.
-    Returns a dict: {theme: [fix_text, ...]}
-    """
-    THEMES = {
-        "disease focus / manifestation":  r"disease.?focus|manifestation|nf1|nf2|schwannomatos|mpnst",
-        "study leads / authors":          r"study.?lead|author|pi |principal.?investigator|correspond",
-        "assay type":                     r"\bassay\b|rna.?seq|scrna|single.?cell|wgs|wes|chip|atac|proteom",
-        "species":                        r"\bspecies\b|mouse|human|murine|homo.?sapien|mus.?muscul",
-        "tumor type / diagnosis":         r"tumor.?type|tumortype|diagnosis|cancer|glioma|neurofibroma",
-        "file format":                    r"file.?format|fastq|bam|vcf|csv|tsv|gz\b",
-        "specimen / individual ID":       r"specimeni?d|individuali?d|sample.?id",
-        "annotations missing / wrong":   r"missing|wrong|incorrect|should be|needs? to be|update|fix",
-        "schema / validation":            r"schema|valid|bind|template",
-        "resource status":                r"resource.?status|pending|approved",
-        "accession / repository":         r"accession|repository|geo|sra|ena|pride|zenodo",
-    }
-
-    groups = {theme: [] for theme in THEMES}
-    groups["other"] = []
-
-    for cmd in fix_commands:
-        text  = cmd["fix_text"].lower()
-        found = False
-        for theme, pattern in THEMES.items():
-            if re.search(pattern, text, re.IGNORECASE):
-                groups[theme].append(cmd)
-                found = True
-                break
-        if not found:
-            groups["other"].append(cmd)
-
-    # Remove empty themes
-    return {k: v for k, v in groups.items() if v}
-
-
 def main():
     lookback_days = int(os.environ.get("LOOKBACK_DAYS", "7"))
     workspace_dir = os.environ.get("NADIA_WORKSPACE_DIR", "/tmp/nf_agent")
@@ -139,28 +102,15 @@ def main():
     fix_commands = collect_fix_commands(lookback_days)
     print(f"  Total fix commands found: {len(fix_commands)}")
 
-    if not fix_commands:
-        print("No fix commands found this week — writing minimal prompt.")
-        summary_text = "No /nadia fix: commands were issued in the past week."
-        detailed_text = ""
+    # Build the flat fix log — Claude Code will identify themes itself
+    if fix_commands:
+        fix_log = "\n".join(
+            f"- Issue #{c['issue_number']} ({c['issue_title'][:80]}): "
+            f"`{c['fix_text']}` ({c['created_at'][:10]})"
+            for c in fix_commands
+        )
     else:
-        groups = summarise_fix_commands(fix_commands)
-
-        # Build summary table
-        summary_lines = ["| Theme | Count | Example fixes |", "|-------|-------|---------------|"]
-        for theme, cmds in sorted(groups.items(), key=lambda x: -len(x[1])):
-            examples = "; ".join(c["fix_text"][:80] for c in cmds[:3])
-            summary_lines.append(f"| {theme} | {len(cmds)} | {examples} |")
-        summary_text = "\n".join(summary_lines)
-
-        # Build detailed log
-        detail_lines = []
-        for cmd in fix_commands:
-            detail_lines.append(
-                f"- Issue #{cmd['issue_number']} ({cmd['issue_title'][:80]}): "
-                f"`{cmd['fix_text']}` [{cmd['created_at'][:10]}]({cmd['comment_url']})"
-            )
-        detailed_text = "\n".join(detail_lines)
+        fix_log = "_No /nadia fix: commands were issued in the past week._"
 
     os.makedirs(workspace_dir, exist_ok=True)
 
@@ -179,13 +129,9 @@ def main():
 
 ---
 
-## Fix Command Summary
+## Fix Log
 
-{summary_text}
-
-## Full Fix Log
-
-{detailed_text if detailed_text else '_No fix commands this week._'}
+{fix_log}
 
 ---
 
@@ -193,9 +139,14 @@ def main():
 
 You are NADIA, reviewing your own recent annotation errors to improve future runs.
 
-### Step 1 — Analyse the patterns
+### Step 1 — Identify patterns
 
-Read the fix command summary above. For each theme with ≥ 1 fix:
+Read the fix log above. Group the fixes into themes yourself — the right groupings
+will emerge from the data (e.g. repeated field errors, systematic misidentification
+of a value, gaps in the audit step, unreliable data sources). There are no
+pre-defined categories; use your judgement.
+
+For each pattern you identify:
 - What is the likely root cause in the current instructions or code?
 - Is it a missing or ambiguous instruction in CLAUDE.md?
 - Is it a schema enum value that's hard to infer?
