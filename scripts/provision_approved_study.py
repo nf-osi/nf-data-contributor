@@ -16,8 +16,11 @@ Steps performed (all code, no LLM):
   3. Add project to Studies source ProjectView (studies_source_view_id in config)
      → auto-populates the portal Studies MaterializedView (studies_table_id in config)
   4. Add project numeric ID to portal Files FileView (files_table_id in config) scope
-  5. Update NADIA state table (NF_DataContributor_ProcessedStudies) → status = 'approved'
-  6. Post a summary comment on the GitHub issue and close the issue
+  5. Populate study long-text table (long_text_table_id) with standard access requirements
+     and acknowledgement statements
+  6. Upsert publication record into portal publications table (publications_table_id)
+  7. Update NADIA state table (NF_DataContributor_ProcessedStudies) → status = 'approved'
+  8. Post a summary comment on the GitHub issue and close the issue
 
 Usage:
     python scripts/provision_approved_study.py --issue-number 42
@@ -240,11 +243,163 @@ def step3_add_to_files_fileview(syn, project_id, files_table_id):
         return False
 
 
-def step4_update_state_table(syn, cfg, project_id):
+ACCESS_REQUIREMENTS = (
+    "Data in this study are hosted in one or more external repositories. "
+    "Depending on the specific dataset, data may be openly accessible or may require "
+    "registration and approval at the originating repository. "
+    "Please review and comply with the access requirements of the source repository "
+    "before downloading or using these data."
+)
+
+ACKNOWLEDGEMENT_STATEMENTS = (
+    "If you use these data in a publication or presentation, please cite the source "
+    "data publication (listed above). Additionally, please include the following "
+    "statement in your acknowledgements to help us track the usage and impact of the "
+    "NF Data Portal:\n\n"
+    "> \"Data were identified through the NF Data Portal "
+    "(http://www.nf.synapse.org, RRID:SCR_021683).\""
+)
+
+
+def step4_upsert_long_text(syn, project_id, metadata, long_text_table_id):
     """
-    Update NADIA state table rows for this project to status='approved'.
-    Uses syn_nadia (SYNAPSE_AUTH_TOKEN) which owns the state tables.
+    Insert or update a row in the Portal Study Long Text table (syn16787123).
+
+    Columns: studyId (ENTITYID), summary (LARGETEXT), accessRequirements (LARGETEXT),
+             acknowledgementStatements (LARGETEXT)
+
+    The summary is built from available metadata. accessRequirements and
+    acknowledgementStatements use the standard NADIA boilerplate.
     """
+    import pandas as pd
+
+    study_name  = metadata.get("study_name", project_id)
+    accessions  = metadata.get("accessions", [])
+    pmid        = metadata.get("pmid", "")
+    doi         = metadata.get("doi", "")
+
+    # Build a concise summary from available metadata
+    acc_str = ", ".join(accessions) if accessions else "an external repository"
+    summary_parts = [
+        f'Data from the publication "{study_name}" are hosted externally ({acc_str}).',
+    ]
+    if pmid:
+        summary_parts.append(f"Source publication: https://pubmed.ncbi.nlm.nih.gov/{pmid}/")
+    elif doi:
+        summary_parts.append(f"Source publication: https://doi.org/{doi}")
+    summary = " ".join(summary_parts)
+
+    try:
+        # Check for existing row
+        existing = syn.tableQuery(
+            f"SELECT * FROM {long_text_table_id} WHERE studyId = '{project_id}'"
+        )
+        df_existing = existing.asDataFrame()
+
+        new_row = {
+            "studyId": project_id,
+            "summary": summary,
+            "accessRequirements": ACCESS_REQUIREMENTS,
+            "acknowledgementStatements": ACKNOWLEDGEMENT_STATEMENTS,
+        }
+
+        if not df_existing.empty:
+            # Update in place — preserve any existing summary if curator wrote one
+            df_existing["accessRequirements"]    = ACCESS_REQUIREMENTS
+            df_existing["acknowledgementStatements"] = ACKNOWLEDGEMENT_STATEMENTS
+            if not df_existing["summary"].iloc[0]:
+                df_existing["summary"] = summary
+            syn.store(synapseclient.Table(long_text_table_id, df_existing))
+            print(f"  Updated existing long-text row for {project_id}")
+        else:
+            df_new = pd.DataFrame([new_row])
+            syn.store(synapseclient.Table(long_text_table_id, df_new))
+            print(f"  Inserted long-text row for {project_id}")
+
+        return True
+    except Exception as e:
+        print(f"  WARN: long-text table update failed: {e}", file=sys.stderr)
+        return False
+
+
+def step5_upsert_publication(syn, project_id, metadata, publications_table_id):
+    """
+    Insert a row into the Portal Publications table (syn16857542) if the
+    publication (matched by PMID or DOI) is not already present.
+
+    Columns: doi, diseaseFocus, journal, title, year, pmid (prefix 'PMID:'),
+             author (STRING_LIST), manifestation (STRING_LIST),
+             fundingAgency (STRING_LIST), studyId (STRING_LIST), studyName (STRING_LIST)
+    """
+    import datetime
+    import pandas as pd
+
+    pmid         = metadata.get("pmid", "")
+    doi          = metadata.get("doi", "")
+    study_name   = metadata.get("study_name", "")
+    study_leads  = metadata.get("study_leads", [])
+    disease_focus = metadata.get("disease_focus", [])
+    manifestation = metadata.get("manifestation", [])
+
+    if not pmid and not doi:
+        print("  No PMID or DOI in metadata — skipping publications table", file=sys.stderr)
+        return False
+
+    try:
+        # Check for existing row by PMID or DOI
+        pmid_formatted = f"PMID:{pmid}" if pmid else ""
+        existing = None
+
+        if pmid_formatted:
+            res = syn.tableQuery(
+                f"SELECT * FROM {publications_table_id} WHERE pmid = '{pmid_formatted}'"
+            )
+            df_check = res.asDataFrame()
+            if not df_check.empty:
+                existing = df_check
+
+        if existing is None and doi:
+            res = syn.tableQuery(
+                f"SELECT * FROM {publications_table_id} WHERE doi = '{doi}'"
+            )
+            df_check = res.asDataFrame()
+            if not df_check.empty:
+                existing = df_check
+
+        if existing is not None and not existing.empty:
+            print(f"  Publication already in portal publications table — skipping insert")
+            return True
+
+        # Insert new publication row
+        current_year = datetime.date.today().year
+        disease_focus_val = disease_focus[0] if disease_focus else None
+
+        new_row = {
+            "title":        study_name,
+            "pmid":         pmid_formatted or None,
+            "doi":          doi or None,
+            "year":         current_year,
+            "author":       study_leads if study_leads else None,
+            "diseaseFocus": disease_focus_val,
+            "manifestation": manifestation if manifestation else None,
+            "studyId":      [project_id],
+            "studyName":    [study_name[:200]] if study_name else None,
+            "journal":      None,
+            "fundingAgency": None,
+        }
+
+        df_new = pd.DataFrame([new_row])
+        syn.store(synapseclient.Table(publications_table_id, df_new))
+        print(f"  Inserted publication row for '{study_name[:80]}...'")
+        return True
+
+    except Exception as e:
+        print(f"  WARN: publications table update failed: {e}", file=sys.stderr)
+        return False
+
+
+def step6_update_state_table(syn, cfg, project_id):
+    """Update NADIA state table rows for this project to status='approved'."""
     try:
         state_project_id = os.environ.get("STATE_PROJECT_ID", "")
         if not state_project_id:
@@ -281,7 +436,8 @@ def step4_update_state_table(syn, cfg, project_id):
 
 
 def post_success_comment(issue_number, project_id, stats,
-                         studies_view_added, files_view_added, state_updated):
+                         studies_view_added, files_view_added,
+                         long_text_updated, pub_upserted, state_updated):
     synapse_url = f"https://www.synapse.org/Synapse:{project_id}"
 
     def status_icon(ok):
@@ -295,6 +451,8 @@ def post_success_comment(issue_number, project_id, stats,
         f"| `resourceStatus` → `approved` | ✅ Project + {stats['files']:,} files + {stats['datasets']} dataset(s) |",
         f"| Added to portal Studies view | {status_icon(studies_view_added)} |",
         f"| Added to portal Files FileView | {status_icon(files_view_added)} |",
+        f"| Study long-text populated | {status_icon(long_text_updated)} |",
+        f"| Publication record upserted | {status_icon(pub_upserted)} |",
         f"| NADIA state table updated | {status_icon(state_updated)} |",
         f"| Errors | {'⚠️ ' + str(stats['errors']) if stats['errors'] else '✅ None'} |",
         "",
@@ -347,6 +505,8 @@ def main():
     dedup = cfg["deduplication"]
     studies_source_view_id = dedup["studies_source_view_id"]
     files_table_id         = dedup["files_table_id"]
+    long_text_table_id     = dedup["long_text_table_id"]
+    publications_table_id  = dedup["publications_table_id"]
 
     # Two Synapse clients: portal token for portal assets, NADIA token for state tables
     print("Connecting to Synapse (portal account)...")
@@ -395,19 +555,28 @@ def main():
     print(f"\nStep 3: Adding to Files FileView ({files_table_id})...")
     files_view_added = step3_add_to_files_fileview(syn_portal, project_id, files_table_id)
 
-    # Step 4 — Update NADIA state table
-    print("\nStep 4: Updating NADIA state table...")
+    # Step 4 — Populate study long-text (summary, access requirements, acknowledgements)
+    print(f"\nStep 4: Populating study long-text table ({long_text_table_id})...")
+    long_text_updated = step4_upsert_long_text(syn_portal, project_id, metadata, long_text_table_id)
+
+    # Step 5 — Insert publication record if not already present
+    print(f"\nStep 5: Upserting publication record ({publications_table_id})...")
+    pub_upserted = step5_upsert_publication(syn_portal, project_id, metadata, publications_table_id)
+
+    # Step 6 — Update NADIA state table
+    print("\nStep 6: Updating NADIA state table...")
     if syn_nadia:
-        state_updated = step4_update_state_table(syn_nadia, cfg, project_id)
+        state_updated = step6_update_state_table(syn_nadia, cfg, project_id)
     else:
         state_updated = False
         print("  Skipped (SYNAPSE_AUTH_TOKEN not available)")
 
-    # Step 5 — Post completion comment and close issue
-    print("\nStep 5: Posting completion comment and closing issue...")
+    # Step 7 — Post completion comment and close issue
+    print("\nStep 7: Posting completion comment and closing issue...")
     post_success_comment(
         issue_number, project_id, stats,
-        studies_view_added, files_view_added, state_updated
+        studies_view_added, files_view_added,
+        long_text_updated, pub_upserted, state_updated,
     )
 
     print("\nProvisioning complete.", flush=True)

@@ -37,6 +37,8 @@ deduplication:
   studies_table_id: "syn52694652"        # MaterializedView — read-only, fed by studies_source_view_id
   studies_source_view_id: "syn52677631"  # ProjectView — add NADIA project IDs here to surface in portal
   files_table_id: "syn16858331"          # Files FileView — scopeIds are numeric (no 'syn' prefix)
+  long_text_table_id: "syn16787123"      # Study long-text (summary, accessRequirements, acknowledgementStatements)
+  publications_table_id: "syn16857542"   # Portal publications table
   # datasets_table_id "syn16859580" removed — entity does not exist (404)
   # TF-IDF cosine similarity threshold for fuzzy title matching
   fuzzy_title_threshold: 0.85
