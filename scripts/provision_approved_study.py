@@ -445,7 +445,7 @@ def step5_upsert_publication(syn, project_id, metadata, publications_table_id):
             "manifestation": manifestation if manifestation else None,
             "studyId":       [project_id],
             "studyName":     [study_name[:200]] if study_name else None,
-            "fundingAgency": None,
+            "fundingAgency": [],
         }
 
         df_new = pd.DataFrame([new_row])
