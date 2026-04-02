@@ -561,7 +561,6 @@ Each repository accession → one Dataset entity (direct child of project) + one
 | `diagnosis` | Yes | must match schema enum |
 | `fileFormat` | **Yes** | strip compression suffixes (`.gz`→ bare ext); match schema enum |
 | `resourceType` | Yes | `experimentalData` for data files |
-| `resourceStatus` | Yes | `pendingReview` |
 | `externalAccessionID` | Yes | |
 | `externalRepository` | Yes | |
 | `specimenID` | **Yes** | **one per file** — parse from filename prefix, never a list |
@@ -786,7 +785,7 @@ Before logging `synapse_created` or `dataset_added`, verify:
 
 ### Per dataset (repeat for each accession)
 - [ ] `Raw Data/{Repo}_{AccessionID}_files/` folder exists with File entities
-- [ ] Each File entity has: `study`, `assay`, `species`, `tumorType`, `diagnosis`, `fileFormat`, `resourceType`, `resourceStatus`, `externalAccessionID`, `externalRepository`, `specimenID` (one per file), `individualID` (one per file)
+- [ ] Each File entity has: `study`, `assay`, `species`, `tumorType`, `diagnosis`, `fileFormat`, `resourceType`, `externalAccessionID`, `externalRepository`, `specimenID` (one per file), `individualID` (one per file)
 - [ ] `fileFormat` strips compression suffixes (`fastq.gz` → `fastq`, `txt.gz` → `txt`)
 - [ ] `tumorType` set on every file
 - [ ] `specimenID` is per-file, not a multi-value list

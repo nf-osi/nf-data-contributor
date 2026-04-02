@@ -12,7 +12,7 @@ Two Synapse clients are used:
 
 Steps performed (all code, no LLM):
   1. Parse issue body to extract Synapse project ID and metadata
-  2. Update resourceStatus → 'approved' on: project, all File entities, all Dataset entities
+  2. Update resourceStatus → 'approved' on: project and all Dataset entities (not files)
   3. Add project to Studies source ProjectView (studies_source_view_id in config)
      → auto-populates the portal Studies MaterializedView (studies_table_id in config)
   4. Add project numeric ID to portal Files FileView (files_table_id in config) scope
@@ -138,10 +138,10 @@ def update_resource_status(syn, entity_id, new_status="approved"):
 
 def step1_update_resource_status(syn, project_id):
     """
-    Set resourceStatus=approved on project, all dataset entities, and all files.
-    Uses syn_portal which has admin rights on NADIA-created projects.
+    Set resourceStatus=approved on the project and all Dataset entities.
+    Files do not carry resourceStatus — it is a project-level annotation only.
     """
-    updated = {"project": 0, "files": 0, "datasets": 0, "errors": 0}
+    updated = {"project": 0, "datasets": 0, "errors": 0}
 
     # Project
     try:
@@ -161,26 +161,6 @@ def step1_update_resource_status(syn, project_id):
         except Exception as e:
             print(f"  WARN: dataset {ds['id']}: {e}", file=sys.stderr)
             updated["errors"] += 1
-
-    # Files inside Raw Data subfolders
-    project_children = get_children_rest(syn, project_id, types=["folder"])
-    raw_folder = next((c for c in project_children if c["name"] == "Raw Data"), None)
-    if raw_folder:
-        subfolders = get_children_rest(syn, raw_folder["id"], types=["folder"])
-        for sf in subfolders:
-            file_children = list(syn.getChildren(sf["id"], includeTypes=["file"]))
-            for fc in file_children:
-                try:
-                    update_resource_status(syn, fc["id"])
-                    updated["files"] += 1
-                    if updated["files"] % 50 == 0:
-                        print(f"    ... {updated['files']} files updated", flush=True)
-                except Exception as e:
-                    print(f"  WARN: file {fc['id']}: {e}", file=sys.stderr)
-                    updated["errors"] += 1
-                    if updated["errors"] > 20:
-                        print("  Too many errors — stopping file updates", file=sys.stderr)
-                        break
 
     return updated
 
@@ -448,7 +428,7 @@ def post_success_comment(issue_number, project_id, stats,
         "The study has been provisioned to the NF Data Portal.\n",
         "| Step | Result |",
         "|------|--------|",
-        f"| `resourceStatus` → `approved` | ✅ Project + {stats['files']:,} files + {stats['datasets']} dataset(s) |",
+        f"| `resourceStatus` → `approved` | ✅ Project + {stats['datasets']} dataset(s) |",
         f"| Added to portal Studies view | {status_icon(studies_view_added)} |",
         f"| Added to portal Files FileView | {status_icon(files_view_added)} |",
         f"| Study long-text populated | {status_icon(long_text_updated)} |",
@@ -539,8 +519,8 @@ def main():
     print("\nStep 1: Updating resourceStatus → approved...")
     try:
         stats = step1_update_resource_status(syn_portal, project_id)
-        print(f"  Done: project={stats['project']}, files={stats['files']}, "
-              f"datasets={stats['datasets']}, errors={stats['errors']}")
+        print(f"  Done: project={stats['project']}, datasets={stats['datasets']}, "
+              f"errors={stats['errors']}")
     except Exception as e:
         msg = f"Step 1 failed: {e}"
         print(f"ERROR: {msg}", file=sys.stderr)
