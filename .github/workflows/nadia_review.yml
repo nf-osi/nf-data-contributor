@@ -103,23 +103,34 @@ jobs:
 
       - name: Install Claude Code CLI
         if: steps.parse.outputs.command == 'fix'
-        run: npm install -g @anthropic-ai/claude-code
+        run: |
+          npm install -g @anthropic-ai/claude-code
+          # Ensure npm global bin is on PATH for subsequent steps
+          echo "$(npm root -g)/../bin" >> "$GITHUB_PATH"
 
       - name: Run Claude Code fix
         if: steps.parse.outputs.command == 'fix'
+        env:
+          # Pass user-controlled values through env vars to avoid shell injection
+          NADIA_ISSUE_NUMBER: ${{ github.event.issue.number }}
+          NADIA_FIX_DESCRIPTION: ${{ steps.parse.outputs.args }}
+          NADIA_ISSUE_BODY: ${{ github.event.issue.body }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SYNAPSE_AUTH_TOKEN: ${{ secrets.SYNAPSE_AUTH_TOKEN }}
+          NCBI_API_KEY: ${{ secrets.NCBI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          STATE_PROJECT_ID: ${{ vars.STATE_PROJECT_ID }}
+          AGENT_REPO_ROOT: ${{ github.workspace }}
         run: |
-          ISSUE_NUMBER="${{ github.event.issue.number }}"
-          FIX_DESCRIPTION="${{ steps.parse.outputs.args }}"
-          ISSUE_BODY="${{ github.event.issue.body }}"
-
-          # Extract Synapse project ID from issue body
-          SYNAPSE_ID=$(python3 -c "
-          import re, sys
-          body = open('/dev/stdin').read()
-          m = re.search(r'\"synapse_project_id\":\s*\"(syn\d+)\"', body)
-          print(m.group(1) if m else '')
-          " <<< "$ISSUE_BODY")
-
+          # Extract Synapse project ID safely via Python reading env var
+          SYNAPSE_ID=$(python3 - <<'PYEOF'
+import re, os
+body = os.environ.get('NADIA_ISSUE_BODY', '')
+m = re.search(r'"synapse_project_id":\s*"(syn\d+)"', body)
+print(m.group(1) if m else '')
+PYEOF
+)
           if [ -z "$SYNAPSE_ID" ]; then
             echo "Could not extract Synapse project ID from issue body" >&2
             exit 1
@@ -128,22 +139,31 @@ jobs:
           WORKSPACE_DIR=$(python3 -c "import yaml; cfg=yaml.safe_load(open('config/settings.yaml')); print(cfg['agent']['workspace_dir'])")
           mkdir -p "${WORKSPACE_DIR}"
 
-          PROMPT="A data manager has requested a fix to a NADIA Synapse project via GitHub issue #${ISSUE_NUMBER}.
+          # Write prompt to a file to avoid any shell quoting issues
+          python3 - <<PYEOF
+import os
+issue_number    = os.environ['NADIA_ISSUE_NUMBER']
+fix_description = os.environ['NADIA_FIX_DESCRIPTION']
+synapse_id      = '${SYNAPSE_ID}'
+workspace_dir   = '${WORKSPACE_DIR}'
+prompt = f"""A data manager has requested a fix to a NADIA Synapse project via GitHub issue #{issue_number}.
 
-          Synapse project: ${SYNAPSE_ID}
-          Fix requested: ${FIX_DESCRIPTION}
+Synapse project: {synapse_id}
+Fix requested: {fix_description}
 
-          Please:
-          1. Check the current state of the project annotations in Synapse
-          2. Apply the requested fix (update annotations, rename entities, etc. as needed)
-          3. Verify the fix was applied correctly
-          4. Post a GitHub comment on issue #${ISSUE_NUMBER} summarizing what was changed
+Steps:
+1. Read CLAUDE.md for safety rules and context.
+2. Check the current state of the project annotations in Synapse (read project annotations, sample a few files, check dataset entities).
+3. Apply the requested fix (update annotations, rename entities, etc. as needed). Follow all NADIA safety rules.
+4. Verify the fix was applied correctly.
+5. Post a GitHub comment on issue #{issue_number} summarising what was changed. Use scripts/github_issue.py post_issue_comment(), or POST directly to the GitHub API.
 
-          Use the GitHub issue helper at scripts/github_issue.py to post the comment:
-            python scripts/github_issue.py  (see post_issue_comment function)
-          Or post directly via the GitHub API.
-
-          Work in ${WORKSPACE_DIR}. Follow all NADIA safety rules in CLAUDE.md."
+Work in {workspace_dir}. Do not modify CLAUDE.md, lib/, config/, or prompts/.
+"""
+with open(workspace_dir + '/nadia_fix_prompt.md', 'w') as f:
+    f.write(prompt)
+print(prompt[:200])
+PYEOF
 
           claude \
             --permission-mode bypassPermissions \
@@ -151,15 +171,7 @@ jobs:
             --verbose \
             --max-turns 40 \
             --add-dir "${{ github.workspace }}" \
-            -p "$PROMPT"
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          SYNAPSE_AUTH_TOKEN: ${{ secrets.SYNAPSE_AUTH_TOKEN }}
-          NCBI_API_KEY: ${{ secrets.NCBI_API_KEY }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          STATE_PROJECT_ID: ${{ vars.STATE_PROJECT_ID }}
-          AGENT_REPO_ROOT: ${{ github.workspace }}
+            -p "$(cat ${WORKSPACE_DIR}/nadia_fix_prompt.md)"
 
       # ── Unknown command ─────────────────────────────────────────────────────
       - name: Respond to unknown command
