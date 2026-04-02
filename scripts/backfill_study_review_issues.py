@@ -140,12 +140,29 @@ def get_project_annotations(syn, project_id):
 
 
 def get_dataset_file_count(syn, project_id):
-    """Count File entities under a project (best-effort)."""
+    """Count File entities under a project by walking Raw Data subfolders."""
+    def _count(folder_id, depth=0):
+        if depth > 3:
+            return 0
+        total = 0
+        try:
+            for child in syn.getChildren(folder_id):
+                t = child.get("type", "")
+                if "FileEntity" in t:
+                    total += 1
+                elif "Folder" in t:
+                    total += _count(child["id"], depth + 1)
+        except Exception:
+            pass
+        return total
+
     try:
-        results = list(syn.getChildren(project_id, includeTypes=["file"], recursive=True))
-        return len(results)
+        for child in syn.getChildren(project_id):
+            if child.get("name") == "Raw Data" and "Folder" in child.get("type", ""):
+                return _count(child["id"])
     except Exception:
-        return 0
+        pass
+    return 0
 
 
 # ---------------------------------------------------------------------------
