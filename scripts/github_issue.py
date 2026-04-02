@@ -22,6 +22,19 @@ import urllib.request
 import urllib.error
 
 
+def _default_team_mention():
+    """Read team_mention from config/settings.yaml; fall back to empty string."""
+    try:
+        import yaml
+        repo_root = os.environ.get("AGENT_REPO_ROOT", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        cfg_path  = os.path.join(repo_root, "config", "settings.yaml")
+        with open(cfg_path) as f:
+            cfg = yaml.safe_load(f)
+        return cfg.get("notifications", {}).get("github", {}).get("team_mention", "")
+    except Exception:
+        return ""
+
+
 def _github_request(method, path, payload=None):
     """Make a GitHub REST API v3 request."""
     token = os.environ.get("GITHUB_TOKEN", "")
@@ -263,7 +276,7 @@ def main():
     parser.add_argument("--manifestation",       nargs="+", default=[])
     parser.add_argument("--pmid",                default="")
     parser.add_argument("--doi",                 default="")
-    parser.add_argument("--team-mention",        default="nf-osi/dcc-team")
+    parser.add_argument("--team-mention",        default=_default_team_mention())
     args = parser.parse_args()
 
     issue_number, issue_url = create_study_review_issue(

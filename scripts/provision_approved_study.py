@@ -544,9 +544,12 @@ def step6_add_to_dataset_collection(syn, project_id, collection_id):
 
 
 def step7_set_public_permissions(syn, project_id):
-    """Set standard NF portal public permissions on the project:
-      - PUBLIC (273948):          READ + DOWNLOAD  (anyone can view and download)
-      - AUTHENTICATED_USERS (273949): READ          (explicit entry for logged-in users)
+    """Set standard open-access permissions on the project:
+      - PUBLIC (273948):              READ + DOWNLOAD  (anyone can view and download)
+      - AUTHENTICATED_USERS (273949): READ             (explicit entry for logged-in users)
+
+    Principal IDs 273948 and 273949 are Synapse platform constants (same on
+    every Synapse deployment, not portal-specific).
     """
     PUBLIC        = 273948
     AUTHENTICATED = 273949
