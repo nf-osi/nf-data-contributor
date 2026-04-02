@@ -563,8 +563,15 @@ def step7_set_public_permissions(syn, project_id):
         return False
 
 
-def step8_update_state_table(syn, cfg, project_id):
-    """Update NADIA state table rows for this project to status='approved'."""
+def step8_update_state_table(syn, cfg, project_id, metadata):
+    """Update NADIA state table rows for this project to status='approved'.
+
+    If no rows exist (e.g. the discovery run used a different STATE_PROJECT_ID),
+    insert a minimal fallback row so the state table stays consistent.
+    """
+    import datetime
+    import pandas as pd
+
     try:
         state_project_id = os.environ.get("STATE_PROJECT_ID", "")
         if not state_project_id:
@@ -586,13 +593,32 @@ def step8_update_state_table(syn, cfg, project_id):
             f"SELECT * FROM {table_id} WHERE synapse_project_id = '{project_id}'"
         )
         df = results.asDataFrame()
-        if df.empty:
-            print(f"  WARN: no state rows found for project {project_id}", file=sys.stderr)
-            return False
 
-        df["status"] = "approved"
-        syn.store(synapseclient.Table(table_id, df))
-        print(f"  Updated {len(df)} state table row(s) → status=approved")
+        if df.empty:
+            # No row from the discovery run — insert a fallback row so the state
+            # table reflects that this project has been approved.
+            accessions = metadata.get("accessions", [])
+            first_acc  = accessions[0].split(":")[-1] if accessions else project_id
+            source_repo = accessions[0].split(":")[0].upper() if accessions else "unknown"
+            disease_focus = ", ".join(metadata.get("disease_focus", []))
+            fallback = {
+                "accession_id":       first_acc,
+                "doi":                metadata.get("doi", ""),
+                "pmid":               metadata.get("pmid", ""),
+                "source_repo":        source_repo,
+                "run_date":           datetime.date.today().isoformat(),
+                "synapse_project_id": project_id,
+                "status":             "approved",
+                "relevance_score":    1.0,
+                "disease_focus":      disease_focus,
+            }
+            syn.store(synapseclient.Table(table_id, pd.DataFrame([fallback])))
+            print(f"  Inserted fallback state row for {project_id} → status=approved")
+        else:
+            df["status"] = "approved"
+            syn.store(synapseclient.Table(table_id, df))
+            print(f"  Updated {len(df)} state table row(s) → status=approved")
+
         return True
 
     except Exception as e:
@@ -745,7 +771,7 @@ def main():
     # Step 8 — Update NADIA state table
     print("\nStep 8: Updating NADIA state table...")
     if syn_nadia:
-        state_updated = step8_update_state_table(syn_nadia, cfg, project_id)
+        state_updated = step8_update_state_table(syn_nadia, cfg, project_id, metadata)
     else:
         state_updated = False
         print("  Skipped (SYNAPSE_AUTH_TOKEN not available)")
