@@ -145,7 +145,7 @@ ANNOTATION_COLUMNS = [
     ('fileFormat',               'STRING',  64, 'enumeration'),
     ('resourceType',             'STRING',  64, 'enumeration'),
     # NOTE: resourceStatus is intentionally EXCLUDED from Dataset column definitions.
-    # It is an entity-level annotation on the Project and Dataset entity itself,
+    # It is an entity-level annotation on the Project itself,
     # NOT a per-file annotation. Never set resourceStatus on individual File entities.
     ('externalAccessionID',      'STRING', 128, None),           # one value per dataset — not a useful facet
     ('externalRepository',       'STRING',  64, 'enumeration'),
