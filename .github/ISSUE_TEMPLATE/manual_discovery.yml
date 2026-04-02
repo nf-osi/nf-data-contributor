@@ -1,0 +1,42 @@
+name: Manual Dataset Discovery
+description: Submit specific accession IDs, DOIs, or PMIDs for NADIA to discover, annotate, and provision.
+title: "[Manual Discovery] "
+labels: ["manual-discovery", "automated"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        NADIA will process each accession you provide, check for duplicates against the portal,
+        score relevance, create Synapse projects for qualifying datasets, and file study-review
+        issues for data manager review. This issue will remain open until the agent run completes.
+
+  - type: textarea
+    id: accessions
+    attributes:
+      label: Accession IDs / DOIs / PMIDs
+      description: |
+        One per line. Supported formats:
+        - GEO series: `GSE123456`
+        - SRA / BioProject: `SRP123456`, `PRJNA123456`, `PRJEB123456`
+        - PubMed: `PMID:12345678` or just `12345678`
+        - DOI: `10.1038/s41467-xxx-xxxxx-x`
+        - ENA: `ERP123456`, `E-MTAB-1234`
+        - PRIDE: `PXD012345`
+        - EGA: `EGAS00001234567`
+        - Zenodo: `zenodo:1234567` or the full DOI
+        - Figshare, OSF, MetaboLights, etc.
+      placeholder: |
+        GSE123456
+        PMID:12345678
+        10.1038/s41467-025-12345-x
+        PRJNA987654
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes (optional)
+      description: Any context that might help NADIA process these datasets (e.g. disease focus, known study name, reason for submission).
+    validations:
+      required: false
