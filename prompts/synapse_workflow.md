@@ -130,7 +130,12 @@ Leave `facetType` unset for high-cardinality identifier columns (`specimenID`, `
 ```python
 # (col_name, col_type, max_size, facet_type)
 # facet_type = 'enumeration' | None
-ANNOTATION_COLUMNS = [
+#
+# BASE_ANNOTATION_COLUMNS are universal across all portals/schemas.
+# Schema-specific columns (e.g. genotype fields, model organism fields)
+# are appended dynamically by reading the bound schema's properties —
+# do NOT hardcode domain-specific field names here.
+BASE_ANNOTATION_COLUMNS = [
     ('study',                    'STRING', 256, 'enumeration'),
     ('assay',                    'STRING', 128, 'enumeration'),
     ('species',                  'STRING', 128, 'enumeration'),
@@ -151,12 +156,22 @@ ANNOTATION_COLUMNS = [
     ('externalRepository',       'STRING',  64, 'enumeration'),
     ('specimenID',               'STRING', 128, None),           # high-cardinality identifier
     ('individualID',             'STRING', 128, None),           # high-cardinality identifier
-    ('nf1Genotype',              'STRING',  64, 'enumeration'),
-    ('modelSpecies',             'STRING', 128, 'enumeration'),
-    ('modelSex',                 'STRING',  32, 'enumeration'),
-    ('sex',                      'STRING',  32, 'enumeration'),
-    ('assayTarget',              'STRING', 128, 'enumeration'),  # ChIP-seq target (H3K27ac, CTCF, etc.)
 ]
+
+# Extend with schema-specific properties fetched at runtime
+HIGH_CARDINALITY = {'specimenID', 'individualID', 'externalAccessionID', 'name', 'id'}
+BASE_NAMES = {c[0] for c in BASE_ANNOTATION_COLUMNS}
+schema_props = fetch_schema_properties(schema_uri)   # defined in Step A2 above
+ANNOTATION_COLUMNS = list(BASE_ANNOTATION_COLUMNS)
+for prop_name, prop_def in schema_props.items():
+    if prop_name in BASE_NAMES:
+        continue
+    has_enum = bool(prop_def.get('enum')) or any(
+        'enum' in s for s in prop_def.get('anyOf', [])
+    )
+    facet = None if prop_name in HIGH_CARDINALITY else ('enumeration' if has_enum else None)
+    size = 256 if prop_def.get('maxLength', 64) > 128 else (128 if prop_def.get('maxLength', 64) > 64 else 64)
+    ANNOTATION_COLUMNS.append((prop_name, 'STRING', size, facet))
 
 col_ids = []
 for col_name, col_type, col_size, facet_type in ANNOTATION_COLUMNS:
@@ -205,7 +220,7 @@ print(f"  Dataset snapshot minted: {dataset_id}.{snapshot_version}")
 3. Create the Dataset entity and link files  (**now version numbers reflect the annotated state**)
 4. Apply annotations to Dataset entity
 5. Set columnIds on Dataset entity
-6. `bind_nf_schema(syn, files_folder_id, schema_uri)` ← bind to FILES FOLDER
+6. `bind_schema(syn, files_folder_id, schema_uri)` ← bind to FILES FOLDER
 7. Mint stable version of Dataset entity (Step 6 above)
 8. Print validation result
 
@@ -487,23 +502,21 @@ The process (in agent reasoning, not Python):
    - If no match: leave unset (do NOT invent values)
 4. Write only the fields you can confidently populate
 
-Common source → schema field mappings (illustrative, not exhaustive — always check schema_props for current field names):
+Common source → schema field mappings (illustrative, not exhaustive — always call `fetch_schema_properties(schema_uri)` to get the actual field list for the selected schema):
 
-| Source data key | Schema field (if present) | Notes |
-|-----------------|--------------------------|-------|
+| Source data key | Typical schema field | Notes |
+|-----------------|---------------------|-------|
 | organism / scientific_name | `species` | enum — match to binomial |
 | tissue / source | `organ` | enum — match best available |
 | sex / gender | `sex` | enum — male/female/unknown |
 | age / age_at_diagnosis | `age` + `ageUnit` | numeric + enum unit |
-| cell_type / cell line | `isCellLine` (bool enum), `isPrimaryCell` (bool enum) | |
-| genotype / nf1_genotype | `nf1Genotype` | enum |
-| genotype / nf2_genotype | `nf2Genotype` | enum |
-| model organism strain / line | `modelSystemName` | freetext — e.g. "C57BL/6" |
-| model_species | `modelSpecies` | enum |
-| model_age / age | `age` + `ageUnit` | numeric age value + unit enum (days/months/years/etc.) |
-| model_sex | `sex` | enum |
-| treatment / drug / compound | `experimentalCondition` | freetext |
-| perturbed gene / knockdown | `genePerturbed`, `genePerturbationType`, `genePerturbationTechnology` | |
+| cell_type / cell line | `isCellLine`, `isPrimaryCell` | bool enums if present in schema |
+| genotype fields | check `schema_props` for genotype keys | enum if constrained; freetext otherwise |
+| model organism strain / line | check `schema_props` for system/strain name key | freetext |
+| model organism species | check `schema_props` for model species key | enum if present |
+| model age / sex | check `schema_props` for model age/sex keys | enum or numeric + unit |
+| treatment / drug / compound | `experimentalCondition` or compound fields | freetext or enum |
+| perturbed gene / knockdown | check `schema_props` for perturbation keys | |
 | library_strategy / assay | `assay` | enum — RNA-seq, WGS, etc. |
 | instrument_model | `platform` | enum |
 | library_selection / library_prep | `libraryPreparationMethod` | enum |
@@ -576,9 +589,9 @@ for child in syn.getChildren(files_folder_id, includeTypes=['file']):
 > - **`resourceStatus`** — belongs ONLY on the Project and Dataset entity annotations. Setting it on files causes the Datasets tab to show a `resourceStatus` column with values that data managers must manually remove.
 > - **`filename`** — do NOT add a custom `filename` annotation. The Synapse system `name` property (set automatically from the file entity's name) IS the filename column in Dataset views. Adding `filename` as a custom annotation creates a duplicate, non-system column that data managers must remove.
 
-**Model organism shared fields** (required for any mouse/rat/zebrafish study): `modelSpecies`, `modelSex`, `modelAgeUnit`, `modelSystemName`, `nf1Genotype`, `nf2Genotype`. Fetch from repository sample attributes at creation time — do not leave blank. `modelSystemName` is especially important — this is the strain or line name (e.g. `"C57BL/6"`, `"NF1flox/flox;DhhCre"`) that data managers rely on for filtering.
+**Model organism shared fields** — call `fetch_schema_properties(schema_uri)` and populate every model organism field the schema defines (typically: species, sex, age, age unit, system/strain name, and any disease-specific genotype keys). Fetch values from repository sample attributes at creation time — do not leave blank.
 
-**ChIP-seq shared fields** (required for any ChIP-seq or CUT&RUN dataset): `assayTarget` — set to the antibody target from GEO `!Series_extract_protocol_ch1` or ENA `library_selection`/experiment title (e.g. `H3K27ac`, `H3K4me3`, `CTCF`, `EZH2`). This field enables faceted filtering by target in the portal.
+**Assay-target fields** — for any ChIP-seq, CUT&RUN, or antibody-based assay, check `schema_props` for a target/antibody field and populate it from GEO `!Series_extract_protocol_ch1` or ENA `library_selection`/experiment title. This enables faceted filtering by target in the portal.
 
 **Per-file** (values that differ per file): `fileFormat`, `specimenID`, `individualID`, `readPair` (I1/R1/R2 for 10x; R1/R2 for paired-end), `modelAge` (if age varies per sample), `batchID` (if batch varies per file), `aliquotID`
 
@@ -981,7 +994,7 @@ if source_meta_folder:
 
 ---
 
-## `bind_nf_schema()` Helper
+## `bind_schema()` Helper
 
 **Checking if a schema is already bound** — use `js.validate()`, NOT the REST endpoint `/entity/{id}/json_schema_binding` (that returns 404 unconditionally):
 
@@ -1050,7 +1063,7 @@ These issues were discovered when the audit was run on real agent-created projec
 
 4. **Schema enum extraction must use the `properties` layer** — a naive recursive search for any dict with `'enum'` key picks up enum values from unrelated sub-objects (e.g. a clinical questionnaire block inside the behavioral template returned `'Child Behavior Checklist for Ages 1.5-5'` as the assay value for Drosophila grooming data). Always traverse via `schema['properties']`.
 
-5. **`nf-behavioralassaytemplate` covers both human clinical and animal model behavioral data** — its assay enum includes animal tests (open field, rotarod, elevated plus maze, etc.) alongside clinical questionnaires. It always requires `compoundName`/`compoundDose`/`compoundDoseUnit`; set these to `'Not Applicable'`/`'0'`/`'Not Applicable'` for non-drug studies. Also requires `dataType` — use `'behavioral data'`. `nf-biologicalassaydatatemplate` has no enum constraints at all and should be avoided.
+5. **`{uri_prefix}behavioralassaytemplate` covers both human clinical and animal model behavioral data** — its assay enum includes animal tests (open field, rotarod, elevated plus maze, etc.) alongside clinical questionnaires. It always requires `compoundName`/`compoundDose`/`compoundDoseUnit`; set these to `'Not Applicable'`/`'0'`/`'Not Applicable'` for non-drug studies. Also requires `dataType` — use `'behavioral data'`. `{uri_prefix}biologicalassaydatatemplate` has no enum constraints at all and should be avoided.
 
 6. **Dataset `columnIds` count may be stale** — projects created before the column list was expanded from 9 to 16 need their columnIds updated.
 
@@ -1064,9 +1077,9 @@ These issues were discovered when the audit was run on real agent-created projec
 
 11. **`assay` must reflect single-cell vs bulk** — When `library_source = 'TRANSCRIPTOMIC SINGLE CELL'`, `library_strategy` mentions scRNA, or the protocol names 10x Chromium / Fluidigm C1 / Drop-seq / Smart-seq2 (per-cell), the assay is `'single-cell RNA-seq'`, NOT `'RNA-seq'`. Setting bulk RNA-seq on a scRNA-seq dataset causes the wrong schema to be selected (rnaseqtemplate vs scrnaseqtemplate), which cascades to wrong annotation fields and wrong Curator Grid validation.
 
-12. **Model animal fields must be populated at creation, not as a post-hoc fix** — For any mouse/rat/zebrafish dataset, fetch sample metadata from the repository at creation time and populate: `modelAge`, `modelAgeUnit`, `modelSex`, `modelSpecies`, `modelSystemName`, and any disease-specific genotype fields defined in the metadata schema. These values live in ENA sample attributes, GEO sample characteristics, or BioStudies sample sections. Also populate `dissociationMethod`, `specimenPreparationMethod`, `isCellLine`, `runType`, `readPair`, `libraryPrep`, `libraryStrand` — these are all available from repository protocol/library metadata and should never be left blank.
+12. **Schema-specific fields must be populated at creation, not as a post-hoc fix** — After binding the schema, call `fetch_schema_properties(schema_uri)` to get the full list of fields the schema defines. For each property present in the source repository metadata (sample attributes, sample characteristics, protocol/library fields), populate it. Common field groups to look for: model organism descriptors (age, sex, genotype, species, system name), library prep details (dissociation method, specimen preparation, cell line flag, run type, read pair, library prep method, strand), and any disease-specific genotype or treatment fields. Never leave a schema property blank if the source data contains the corresponding value.
 
-13. **Dataset ANNOTATION_COLUMNS must include the expanded set** — The minimum 16-column list is insufficient for scRNA-seq and model organism data. The standard set is now 22 columns, adding: `nucleicAcidSource`, `organ`, `modelSpecies`, `modelSex`, `sex`, and any disease-specific genotype fields from the schema. Always use the full expanded column list.
+13. **Dataset ANNOTATION_COLUMNS must cover all schema properties** — Do not use a hardcoded column list. Build `ANNOTATION_COLUMNS` dynamically: start with the universal base columns, then append every property defined in the bound schema that is not already in the base list. This ensures the Dataset schema matches the actual schema used, regardless of which portal or metadata dictionary is configured.
 
 14. **`resourceStatus` must NOT be set on individual File entities** — Data managers have consistently requested removal of `resourceStatus` from all files. This annotation belongs only on the **Project** and **Dataset entity** (as an entity-level annotation). The audit Phase 1 auto-fix now **removes** `resourceStatus` from any file that has it. Do not set it during creation either (see the CRITICAL note in Step D above).
 
@@ -1122,7 +1135,9 @@ syn = get_synapse_client()
 with open('{WORKSPACE_DIR}/created_projects.json') as f:
     created = json.load(f)
 
-ANNOTATION_COLUMNS = [
+# Build ANNOTATION_COLUMNS dynamically: universal base + schema-specific properties.
+# Do NOT hardcode domain-specific field names — fetch them from the schema at runtime.
+BASE_ANNOTATION_COLUMNS = [
     # (col_name, col_type, max_size, facet_type)
     ('study',                    'STRING', 256, 'enumeration'),
     ('assay',                    'STRING', 128, 'enumeration'),
@@ -1142,12 +1157,22 @@ ANNOTATION_COLUMNS = [
     ('externalRepository',       'STRING',  64, 'enumeration'),
     ('specimenID',               'STRING', 128, None),
     ('individualID',             'STRING', 128, None),
-    ('nf1Genotype',              'STRING',  64, 'enumeration'),
-    ('modelSpecies',             'STRING', 128, 'enumeration'),
-    ('modelSex',                 'STRING',  32, 'enumeration'),
-    ('sex',                      'STRING',  32, 'enumeration'),
-    ('assayTarget',              'STRING', 128, 'enumeration'),  # ChIP-seq target
 ]
+HIGH_CARDINALITY = {'specimenID', 'individualID', 'externalAccessionID', 'name', 'id'}
+BASE_NAMES = {c[0] for c in BASE_ANNOTATION_COLUMNS}
+# For audit: derive schema_uri from the project's files folder binding
+# (read from created_projects.json → schema_uri field, or re-fetch from Synapse)
+schema_props = fetch_schema_properties(proj.get('schema_uri', '')) if proj.get('schema_uri') else {}
+ANNOTATION_COLUMNS = list(BASE_ANNOTATION_COLUMNS)
+for prop_name, prop_def in schema_props.items():
+    if prop_name in BASE_NAMES:
+        continue
+    has_enum = bool(prop_def.get('enum')) or any(
+        'enum' in s for s in prop_def.get('anyOf', [])
+    )
+    facet = None if prop_name in HIGH_CARDINALITY else ('enumeration' if has_enum else None)
+    size = 256 if prop_def.get('maxLength', 64) > 128 else (128 if prop_def.get('maxLength', 64) > 64 else 64)
+    ANNOTATION_COLUMNS.append((prop_name, 'STRING', size, facet))
 
 # Fields auto-fixable without reasoning (value is deterministic)
 AUTO_FIX_PROJECT = {
