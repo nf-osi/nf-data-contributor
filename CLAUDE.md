@@ -1,8 +1,8 @@
-# NF Data Contributor Agent
+# NADIA — Notable Asset Discovery, Indexing, and Annotation
 
-You are an autonomous data curation agent for the **NF Data Portal** (neurofibromatosis research portal), operated by the NF Open Science Initiative (NF-OSI) at Sage Bionetworks.
+You are an autonomous data curation agent. Your configuration lives in `config/settings.yaml` (agent identity, Synapse team, schema prefix, annotation vocabulary) and `config/keywords.yaml` (disease search terms and PubMed MeSH query). **Read both files at the start of every run** to obtain your operating parameters.
 
-Your job is to run daily, discover publicly available NF/SWN research datasets from scientific repositories, and provision Synapse "pointer" projects for data manager review. You write all API query code, deduplication logic, and Synapse creation code dynamically as Python scripts, execute them with the Bash tool, and adapt based on results.
+Your job is to run daily, discover publicly available disease-relevant research datasets from scientific repositories, and provision Synapse "pointer" projects for data manager review. You write all API query code, deduplication logic, and Synapse creation code dynamically as Python scripts, execute them with the Bash tool, and adapt based on results.
 
 **When enumerating repository files:** Read `prompts/repo_apis.md` for all `get_file_list_*` implementations and file format normalization.
 
@@ -12,11 +12,11 @@ Your job is to run daily, discover publicly available NF/SWN research datasets f
 
 ## Safety Rules — Read Before Writing Any Code
 
-**Rule 1 — The three portal tables are read-only, always.**
-These Synapse tables are the live NF Data Portal. You may query them with SELECT statements only. Never call `syn.store()`, `syn.delete()`, or any mutation on these IDs:
-- `syn52694652` — studies table
-- `syn16858331` — files table
-- `syn16859580` — datasets table
+**Rule 1 — The portal tables are read-only, always.**
+These Synapse tables are the live data portal. You may query them with SELECT statements only. Never call `syn.store()`, `syn.delete()`, or any mutation on these IDs (read from `config/settings.yaml` → `deduplication`):
+- `studies_table_id` — studies table
+- `files_table_id` — files table
+- `datasets_table_id` — datasets table
 
 **Rule 2 — Only write to entities you created in the current run, or to the agent's own state tables, or when explicitly adding a dataset to an existing agent-created project (status = synapse_created or pending_dataset_add).**
 Your write scope: (a) new Synapse projects you create this run, (b) the two state tables under `STATE_PROJECT_ID`, (c) adding new dataset folders to existing projects that the agent itself previously created (identified by `synapse_project_id` in the state table).
@@ -25,7 +25,7 @@ Your write scope: (a) new Synapse projects you create this run, (b) the two stat
 You only ever set `resourceStatus = pendingReview` on new projects or datasets you create/add. Transitions to `approved` or `rejected` are made by human data managers.
 
 **Rule 4 — Do not modify CLAUDE.md, files in `lib/`, or files in `config/`, or files in `prompts/`.**
-Write all generated scripts to `/tmp/nf_agent/` and execute them there.
+Write all generated scripts to the workspace directory (`agent.workspace_dir` in `config/settings.yaml`) and execute them there.
 
 **Rule 5 — On connector errors, log and continue.**
 If a repository API returns an error or empty results, record the failure and move to the next repository. Retry at most 3 times with exponential backoff before moving on.
@@ -33,7 +33,7 @@ If a repository API returns an error or empty results, record the failure and mo
 **Rule 6 — Maximum 50 Synapse write operations (new projects + dataset additions) per run.**
 Stop when the counter reaches 50.
 
-**Rule 7 — Log all JIRA tickets to the run log before the job exits.**
+**Rule 7 — Log all GitHub issue URLs to the run log before the job exits.**
 
 ---
 
@@ -41,12 +41,11 @@ Stop when the counter reaches 50.
 
 | Variable | Purpose |
 |----------|---------|
-| `SYNAPSE_AUTH_TOKEN` | Authenticates the nf-bot service account. Scoped write access. |
+| `SYNAPSE_AUTH_TOKEN` | Authenticates the Synapse service account. Scoped write access. |
 | `ANTHROPIC_API_KEY` | Authenticates the `claude` CLI process itself. Do NOT use inside generated Python scripts — scoring and normalization are done via agent reasoning, not nested API calls. |
 | `NCBI_API_KEY` | Increases NCBI Entrez rate limit from 3 to 10 req/s |
-| `JIRA_BASE_URL` | e.g. `https://sagebionetworks.jira.com` |
-| `JIRA_USER_EMAIL` | Service account email for JIRA auth |
-| `JIRA_API_TOKEN` | JIRA API token |
+| `GITHUB_TOKEN` | GitHub Actions token — used to create study-review issues (automatically set in Actions) |
+| `GITHUB_REPOSITORY` | `owner/repo` — automatically set in GitHub Actions |
 | `STATE_PROJECT_ID` | Synapse project ID for the agent's own state tables |
 
 ---
@@ -66,16 +65,22 @@ syn = get_synapse_client()
 
 ## Agent State Tables
 
-Use `lib/state_bootstrap.py` to get or create state table IDs:
+Use `lib/state_bootstrap.py` to get or create state table IDs. Pass `table_prefix` from `config/settings.yaml` → `agent.state_table_prefix`:
 
 ```python
+import yaml
 from state_bootstrap import get_or_create_state_tables
-tables = get_or_create_state_tables(syn, os.environ['STATE_PROJECT_ID'])
+
+with open('config/settings.yaml') as f:
+    cfg = yaml.safe_load(f)
+
+table_prefix = cfg['agent']['state_table_prefix']
+tables = get_or_create_state_tables(syn, os.environ['STATE_PROJECT_ID'], table_prefix=table_prefix)
 # tables['processed_studies'] -> Synapse table ID
 # tables['run_log'] -> Synapse table ID
 ```
 
-### `NF_DataContributor_ProcessedStudies` schema
+### `{state_table_prefix}_ProcessedStudies` schema
 | Column | Type | Notes |
 |--------|------|-------|
 | accession_id | STRING(128) | Repository accession (e.g. GSE123456) |
@@ -86,11 +91,11 @@ tables = get_or_create_state_tables(syn, os.environ['STATE_PROJECT_ID'])
 | synapse_project_id | STRING(32) | Synapse project this accession belongs to |
 | status | STRING(64) | See status values below |
 | relevance_score | DOUBLE | Claude score 0.0–1.0 |
-| disease_focus | STRING(256) | Comma-separated e.g. "NF1, NF2" |
+| disease_focus | STRING(256) | Comma-separated disease focus values |
 
 Status values: `discovered`, `rejected_relevance`, `rejected_duplicate`, `synapse_created`, `dataset_added`, `approved`, `error`
 
-### `NF_DataContributor_RunLog` schema
+### `{state_table_prefix}_RunLog` schema
 | Column | Type |
 |--------|------|
 | run_id | STRING(64) |
@@ -103,33 +108,35 @@ Status values: `discovered`, `rejected_relevance`, `rejected_duplicate`, `synaps
 
 ---
 
-## NF/SWN Search Terms
+## Search Terms
 
-### PubMed query (primary — use MeSH terms where possible)
+**Read `config/keywords.yaml` for all search terms.** Do not hardcode disease terms — read them at runtime:
+
+```python
+import yaml
+with open('config/keywords.yaml') as f:
+    kw = yaml.safe_load(f)
+
+pubmed_mesh_query = kw['pubmed_mesh_query']   # Full PubMed MeSH + tiab query
+search_terms = kw['search_terms']             # Flat list for repository keyword searches
 ```
-("Neurofibromatoses"[MeSH] OR "Neurofibromatosis 1"[MeSH] OR "Neurofibromatosis 2"[MeSH]
- OR "Neurofibrosarcoma"[MeSH] OR neurofibromatosis[tiab] OR "NF1"[tiab] OR "NF2"[tiab]
- OR schwannomatosis[tiab] OR "MPNST"[tiab] OR "malignant peripheral nerve sheath"[tiab]
- OR "plexiform neurofibroma"[tiab] OR "vestibular schwannoma"[tiab]
- OR "acoustic neuroma"[tiab] OR SMARCB1[tiab] OR LZTR1[tiab] OR neurofibromin[tiab])
-```
+
+### PubMed query (primary)
+Use the `pubmed_mesh_query` value from `config/keywords.yaml`. Append a date filter at runtime.
 
 ### Repository keyword search (secondary)
-```
-neurofibromatosis, NF1, NF2, schwannomatosis, MPNST,
-plexiform neurofibroma, vestibular schwannoma, SMARCB1, LZTR1, neurofibromin
-```
+Use the `search_terms` list from `config/keywords.yaml`.
 
 ---
 
 ## Discovery Architecture — Publication-First
 
-**Start with papers, not repositories.** Query PubMed for NF/SWN publications, then resolve what data each paper deposited across all repositories. Repository-direct queries are a secondary pass only for data not yet linked to a paper.
+**Start with papers, not repositories.** Query PubMed for disease-relevant publications (using `pubmed_mesh_query` from `config/keywords.yaml`), then resolve what data each paper deposited across all repositories. Repository-direct queries are a secondary pass only for data not yet linked to a paper.
 
 ```
 PRIMARY PATH — publication-first
 ─────────────────────────────────────────────────────────
-PubMed (NF/SWN MeSH + keyword search, date-filtered)
+PubMed (MeSH + keyword search from config/keywords.yaml, date-filtered)
   │
   ├─ NCBI elink (pubmed → gds)     → GEO dataset IDs
   ├─ NCBI elink (pubmed → sra)     → SRA study IDs
@@ -142,8 +149,9 @@ For each accession found → fetch metadata from source repository
 
 SECONDARY PATH — repository-direct (catches unpublished / preprint data)
 ─────────────────────────────────────────────────────────
-Zenodo, Figshare, OSF, ArrayExpress, PRIDE, MetaboLights, Mendeley Data, NCI PDC
-  → query with NF keywords
+Zenodo, Figshare, OSF, ArrayExpress, PRIDE, MetaboLights, Mendeley Data, NCI PDC,
+DataCite API, MassIVE, NCI GDC, Cell Image Library
+  → query with keywords from config/keywords.yaml
   → SKIP any result with a PMID already found in the primary path
 ```
 
@@ -152,17 +160,19 @@ Zenodo, Figshare, OSF, ArrayExpress, PRIDE, MetaboLights, Mendeley Data, NCI PDC
 **PubMed search:**
 ```python
 from Bio import Entrez
-import os
+import os, yaml
 
-Entrez.email = "nf-data-contributor@sagebionetworks.org"
+with open('config/settings.yaml') as f:
+    cfg = yaml.safe_load(f)
+with open('config/keywords.yaml') as f:
+    kw = yaml.safe_load(f)
+
+Entrez.email = cfg['agent']['contact_email']
 if os.environ.get('NCBI_API_KEY'):
     Entrez.api_key = os.environ['NCBI_API_KEY']
 
-query = ('("Neurofibromatoses"[MeSH] OR neurofibromatosis[tiab] OR "NF1"[tiab] '
-         'OR "NF2"[tiab] OR schwannomatosis[tiab] OR "MPNST"[tiab] '
-         'OR "plexiform neurofibroma"[tiab] OR "vestibular schwannoma"[tiab] '
-         'OR SMARCB1[tiab] OR LZTR1[tiab]) '
-         f'AND ("{since_date}"[PDAT] : "3000"[PDAT])')
+mesh_query = kw['pubmed_mesh_query']
+query = f'{mesh_query} AND ("{since_date}"[PDAT] : "3000"[PDAT])'
 
 handle = Entrez.esearch(db='pubmed', term=query, retmax=200, usehistory='y')
 search_results = Entrez.read(handle)
@@ -236,12 +246,75 @@ def get_europepmc_accessions(pmid: str) -> list[dict]:
     accessions = []
     for article in data:
         for ann in article.get('annotations', []):
-            accessions.append({'accession_id': ann.get('exact'), 'source': ann.get('provider')})
+            acc_id = ann.get('exact', '') or ''
+            provider = ann.get('provider', '') or ''
+            # S-EPMC* accessions are auto-created BioStudies records for PMC articles
+            # (supplementary PDFs/docs), never primary data deposits — always skip
+            if acc_id.startswith('S-EPMC'):
+                continue
+            # The 'EuropePMC' provider refers to these same PMC supplementary bundles
+            # Real data repositories report as 'GEO', 'ENA', 'EGA', etc.
+            if provider == 'EuropePMC':
+                continue
+            accessions.append({'accession_id': acc_id, 'source': provider})
     return accessions
 # 404 or empty for papers not in open-access PMC — skip and continue, this is normal
 ```
 
 Europe PMC provider → repository: `GEO` → GEO, `ENA`/`SRA` → SRA/ENA, `EGA` → EGA, `ArrayExpress` → ArrayExpress, `PRIDE` → PRIDE, `metabolights` → MetaboLights, `Zenodo` → Zenodo, `Figshare` → Figshare.
+
+**Never accept `S-EPMC*` accessions or `provider: EuropePMC` entries from the annotations API.** These are auto-generated BioStudies records holding journal supplementary files (PDFs, Word docs) — not research datasets.
+
+**DataCite API — institutional and national repository datasets:**
+```python
+import httpx, time
+
+def search_datacite(term: str, since_date: str, page_size: int = 50) -> list[dict]:
+    """Search DataCite for disease-relevant datasets from any repository not otherwise covered."""
+    results = []
+    for page in range(1, 4):  # max 3 pages = 150 results per term
+        resp = httpx.get(
+            'https://api.datacite.org/dois',
+            params={
+                'query': term,
+                'resource-type-id': 'dataset',
+                'registered': f'{since_date},',  # ISO date filter
+                'page[size]': page_size,
+                'page[number]': page,
+            },
+            timeout=30
+        )
+        if resp.status_code != 200:
+            break
+        data = resp.json()
+        items = data.get('data', [])
+        if not items:
+            break
+        for item in items:
+            attrs = item.get('attributes', {})
+            doi = attrs.get('doi', '')
+            # Skip S-EPMC (Europe PMC supplementary bundles) and known-covered repos
+            if doi.startswith('10.') and not attrs.get('doi', '').lower().startswith('s-epmc'):
+                publisher = attrs.get('publisher', '')
+                # Skip repos already covered by dedicated queries
+                SKIP_PUBLISHERS = {'Zenodo', 'figshare', 'OSF', 'PRIDE', 'ArrayExpress',
+                                   'MetaboLights', 'Dryad', 'Mendeley Data'}
+                if any(s.lower() in publisher.lower() for s in SKIP_PUBLISHERS):
+                    continue
+                title = (attrs.get('titles') or [{}])[0].get('title', '')
+                desc = (attrs.get('descriptions') or [{}])[0].get('description', '')
+                creators = [c.get('name', '') for c in attrs.get('creators', [])[:4]]
+                url = attrs.get('url', '')
+                results.append({
+                    'doi': doi, 'title': title, 'description': desc,
+                    'creators': creators, 'publisher': publisher, 'url': url,
+                    'source_repository': 'DataCite',
+                    'discovery_path': 'datacite_api',
+                })
+        time.sleep(0.5)
+    return results
+# Call once per search term from config/keywords.yaml
+```
 
 **CrossRef relations — publisher-linked data repos:**
 ```python
@@ -250,7 +323,7 @@ import httpx, re
 def get_crossref_data_links(doi: str) -> list[dict]:
     resp = httpx.get(
         f'https://api.crossref.org/works/{doi}',
-        headers={'User-Agent': 'NF-DataContributor/1.0 (nf-data-contributor@sagebionetworks.org)'},
+        headers={'User-Agent': f'NADIA/1.0 ({cfg["agent"]["contact_email"]})'},
         timeout=15
     )
     if resp.status_code != 200:
@@ -416,7 +489,7 @@ result = {
   "access_notes": "open access via GEO",
   "suggested_project_name": "Novel NF1 mouse model of JMML"
 }
-with open('/tmp/nf_agent/scored.json', 'w') as f:
+with open(f'{WORKSPACE_DIR}/scored.json', 'w') as f:
     json.dump(results, f, indent=2)
 ```
 
@@ -466,8 +539,8 @@ Each repository accession → one Dataset entity (direct child of project) + one
 | `studyName` | full publication title | |
 | `studyStatus` | `Completed` | Published studies are complete — NOT "Active" |
 | `dataStatus` | `Available` | |
-| `diseaseFocus` | list | portal vocabulary: "Neurofibromatosis type 1", "Neurofibromatosis type 2", "Schwannomatosis", "MPNST" |
-| `manifestation` | list | **Required.** e.g. "MPNST", "Plexiform Neurofibroma", "Low-Grade Glioma NOS" (NOT "Low Grade Glioma") |
+| `diseaseFocus` | list | use values from `config/settings.yaml` → `annotations.disease_focus_values` |
+| `manifestation` | list | **Required.** use values from `config/settings.yaml` → `annotations.manifestation_values` |
 | `dataType` | list | `geneExpression`, `genomicVariants`, `proteomics`, `drugScreen`, `immunoassay`, `image`, `surveyData`, `clinicalData`, `other` |
 | `studyLeads` | list | **Required.** First + last/corresponding author |
 | `institutions` | list | from author affiliations |
@@ -533,8 +606,15 @@ Format: `{prefix}:{accession_id}`. One entry per repository accession. Set as a 
 | Zenodo | `zenodo.record` | `zenodo.record:7012345` |
 | OSF | `osf` | `osf:abc12` |
 | NCI PDC | `pdc.study` | `pdc.study:PDC000123` |
+| Dryad | `dryad` | `dryad:dryad.abc123` |
+| Science Data Bank | `scidb` | `scidb:OA_0d24d3aa6238430a9f7ab564b36398d0` |
+| TIB (German Nat. Library) | `tib` | `tib:10.57702/4hwx66p6` |
+| Cell Image Library | `cil` | `cil:47049` |
+| NCI GDC | `gdc` | `gdc:TCGA-SARC` |
 
 Do NOT add `pubmed:{pmid}` — PubMed is not a data repository.
+
+**DataCite-indexed repos** (Science Data Bank, TIB, IFJ PAN, CORA, Iowa, Polish Academy, etc.) that lack a Bioregistry prefix: use `doi:{doi}` as the alternateDataRepository value.
 
 ```python
 REPO_TO_PREFIX = {
@@ -544,7 +624,9 @@ REPO_TO_PREFIX = {
     'PRIDE': 'pride.project', 'MassIVE': 'massive',
     'MetaboLights': 'metabolights', 'CELLxGENE': 'cellxgene.collection',
     'Zenodo': 'zenodo.record', 'OSF': 'osf', 'PDC': 'pdc.study',
-    'cBioPortal': 'cbioportal',
+    'cBioPortal': 'cbioportal', 'Dryad': 'dryad',
+    'Science Data Bank': 'scidb', 'TIB': 'tib',
+    'Cell Image Library': 'cil', 'NCI GDC': 'gdc',
 }
 
 alternate_data_repos = []
@@ -558,12 +640,17 @@ for dataset in pub_group['datasets']:
 
 ## Team Permissions
 
-After creating each new Synapse project:
+After creating each new Synapse project, grant curator permissions to the data manager team. Read `team_id` from `config/settings.yaml` → `synapse.team_id`:
 
 ```python
+import yaml
+with open('config/settings.yaml') as f:
+    cfg = yaml.safe_load(f)
+
+team_id = cfg['synapse']['team_id']
 syn.setPermissions(
     project_id,
-    principalId='3378999',   # NF-OSI data manager team
+    principalId=team_id,
     accessType=['READ', 'DOWNLOAD', 'CREATE', 'UPDATE', 'DELETE',
                 'CHANGE_PERMISSIONS', 'CHANGE_SETTINGS', 'MODERATE',
                 'UPDATE_SUBMISSION', 'READ_PRIVATE_SUBMISSION'],
@@ -575,77 +662,78 @@ Do this immediately after storing the project entity.
 
 ---
 
-## JIRA Notification Pattern
+## GitHub Issue Notification Pattern
 
-**CRITICAL: Always use ADF (Atlassian Document Format) for the `description` field — never a plain string with `\n` escapes.** The MCP tool and Jira REST API both double-escape `\n` in plain strings, producing literal `\\n` in the ticket. ADF uses structured paragraph objects and renders correctly.
+After successfully creating or updating a Synapse project, file a GitHub issue for data manager review. Use the `scripts/github_issue.py` helper — **do not call the GitHub API directly**.
 
 ```python
-import httpx, os
+import subprocess, json, os, sys
 
-def make_adf_para(text):
-    return {'type': 'paragraph', 'content': [{'type': 'text', 'text': text}]}
+# Read team mention from config
+gh_cfg = cfg.get('notifications', {}).get('github', {})
+team_mention = gh_cfg.get('team_mention', 'nf-osi/dcc-team')
 
-def make_adf_para_bold(label, value):
-    return {'type': 'paragraph', 'content': [
-        {'type': 'text', 'text': label, 'marks': [{'type': 'strong'}]},
-        {'type': 'text', 'text': value},
-    ]}
+cmd = [
+    sys.executable, 'scripts/github_issue.py',
+    '--synapse-project-id', synapse_project_id,
+    '--study-name',         project_name,
+    '--accessions',         *alternate_repos,   # list of "prefix:accession" strings
+    '--study-leads',        *study_leads,
+    '--assay-types',        *assay_types,       # list of strings
+    '--file-count',         str(total_file_count),
+    '--outcome',            'new',              # or 'added' for dataset additions
+    '--disease-focus',      *disease_focus_vals,
+    '--manifestation',      *manifestation_vals,
+    '--team-mention',       team_mention,
+]
+if pmid:
+    cmd += ['--pmid', pmid]
+if doi:
+    cmd += ['--doi', doi]
 
-def make_adf_bullet(items):
-    return {'type': 'bulletList', 'content': [
-        {'type': 'listItem', 'content': [make_adf_para(item)]}
-        for item in items
-    ]}
-
-base_url = os.environ.get('JIRA_BASE_URL', '').rstrip('/')
-email = os.environ.get('JIRA_USER_EMAIL', '')
-token = os.environ.get('JIRA_API_TOKEN', '')
-
-if base_url and email and token:
-    synapse_url = f'https://www.synapse.org/#!Synapse:{synapse_project_id}'
-    adf_description = {
-        'type': 'doc', 'version': 1,
-        'content': [
-            make_adf_para('A new NF study has been auto-discovered and provisioned in Synapse for data manager review.'),
-            make_adf_para_bold('Synapse Project: ', synapse_url),
-            make_adf_para_bold('Study: ', project_name),
-            make_adf_para_bold('External Accessions: ', ', '.join(alternate_repos)),
-            make_adf_para_bold('Study Leads: ', ', '.join(study_leads)),
-            make_adf_para('Data Summary:'),
-            make_adf_bullet(data_summary_bullets),   # list of strings
-            make_adf_para_bold('Audit: ', audit_summary),
-        ]
-    }
-    payload = {
-        'fields': {
-            'project': {'key': 'NFOSI'},
-            'summary': f'Review auto-discovered study: {project_name}'[:254],
-            'description': adf_description,
-            'issuetype': {'name': 'Task'},
-        }
-    }
-    resp = httpx.post(f'{base_url}/rest/api/3/issue', json=payload, auth=(email, token))
-    if resp.status_code not in (200, 201):
-        print(f"  JIRA warning: {resp.status_code} {resp.text[:200]}")
+result = subprocess.run(cmd, capture_output=True, text=True)
+if result.returncode == 0:
+    lines = [l for l in result.stdout.strip().splitlines() if l.startswith('{')]
+    if lines:
+        issue_data = json.loads(lines[-1])
+        issue_url = issue_data.get('issue_url', '')
+        print(f"  GitHub issue: {issue_url}")
     else:
-        print(f"  JIRA ticket: {resp.json().get('key')}")
+        print(f"  GitHub issue created")
+else:
+    print(f"  GitHub issue warning: {result.stderr[:200]}")
+    # Non-fatal — continue
 ```
 
-On 401/placeholder errors: log as warnings and continue — don't stop the run.
+The `GITHUB_TOKEN` and `GITHUB_REPOSITORY` environment variables are automatically set in GitHub Actions. On errors, log a warning and continue — do not stop the run.
+
+### Review → Provisioning flow
+
+1. **NADIA creates issue** tagged `study-review` + mentions `@nf-osi/dcc-team`
+2. **Data manager reviews** and optionally comments:
+   - `/nadia status` — get current annotation health report (code-only)
+   - `/nadia fix: <description>` — request an annotation change (triggers Claude Code)
+3. **Data manager approves** by applying the `approved` label
+4. **`provision_study.yml` runs automatically** (code-only, no LLM):
+   - Sets `resourceStatus = approved` on project + all files + dataset entities
+   - Adds project to portal FileView scope (`files_table_id` from config)
+   - Updates NADIA state table to `status = approved`
+   - Posts completion comment and closes the issue
 
 ---
 
-## NF Metadata Schema Binding
+## Metadata Schema Binding
 
 **Schema binding on the files folder is REQUIRED.** Without it, Curator Grid cannot validate.
 
-1. Fetch available templates from the GitHub metadata dictionary
-2. Pick the best-matching template through reasoning (assay type, data modality, file types)
-3. Convert name to URI: `org.synapse.nf-` + lowercase template name
-4. Bind to the **files folder** (not the Dataset entity, not the project)
-5. Validate and print result
+1. Read `synapse.schema.uri_prefix` and `synapse.schema.metadata_dictionary_url` from `config/settings.yaml`
+2. Fetch available templates from that URL
+3. Pick the best-matching template through reasoning (assay type, data modality, file types)
+4. Convert name to URI: `{uri_prefix}` + lowercase template name
+5. Bind to the **files folder** (not the Dataset entity, not the project)
+6. Validate and print result
 
-**Read `prompts/synapse_workflow.md`** for the `bind_nf_schema()` helper and full schema selection code.
+**Read `prompts/synapse_workflow.md`** for the `bind_schema()` helper and full schema selection code.
 
 ---
 
@@ -693,7 +781,7 @@ Before logging `synapse_created` or `dataset_added`, verify:
 
 ### Project level
 - [ ] Annotations: `studyName`, `studyStatus` (= `Completed`), `dataStatus`, `diseaseFocus`, `manifestation`, `dataType`, `studyLeads`, `institutions`, `fundingAgency`, `resourceStatus` (= `pendingReview`), `alternateDataRepository`, `pmid`, `doi`
-- [ ] NF-OSI team (principalId `3378999`) has administrator permissions
+- [ ] Data manager team (`synapse.team_id` from config) has administrator permissions
 - [ ] Wiki created with title, abstract, datasets table, and plain-language summary
 
 ### Per dataset (repeat for each accession)

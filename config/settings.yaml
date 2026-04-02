@@ -1,8 +1,18 @@
-# NF Data Contributor Agent — Runtime Settings
+# Data Contributor Agent — Runtime Settings
+# Copy this file and fill in values for your disease domain / organization.
 
 agent:
-  name: "NF Data Contributor Agent"
+  name: "NADIA"
+  description: "Notable Asset Discovery, Indexing, and Annotation — autonomous data curation for the NF Data Portal"
   version: "1.0.0"
+  # Working directory for generated scripts and intermediate files
+  workspace_dir: "/tmp/nf_agent"
+  # Prefix for Synapse state table names: {prefix}_ProcessedStudies, {prefix}_RunLog
+  state_table_prefix: "NF_DataContributor"
+  # Name of the Synapse project that holds agent state tables
+  state_project_name: "NF DataContributor Agent State"
+  # Contact email used in API User-Agent strings and Entrez requests
+  contact_email: "nf-data-contributor@sagebionetworks.org"
   # Synapse project ID for the agent's own state tables
   # Set to null on first run; the agent will create one and log the ID
   state_project_id: null
@@ -23,7 +33,7 @@ discovery:
   max_results_per_connector: 50
 
 deduplication:
-  # Synapse table IDs for the live NF Data Portal
+  # Synapse table IDs for the live target portal — set for your portal instance
   studies_table_id: "syn52694652"
   files_table_id: "syn16858331"
   datasets_table_id: "syn16859580"
@@ -37,20 +47,49 @@ synapse:
   # Project name template: EXT_{Repository}_{AccessionID}
   project_name_template: "EXT_{repository}_{accession_id}"
   resource_status: "pendingReview"
+  # Principal ID of the data manager team that receives curator permissions on new projects
+  # Find this in Synapse: Teams → your data manager team → team ID in the URL
+  team_id: "3378999"
+  schema:
+    # Prefix prepended to template names to form a Synapse JSON Schema URI
+    # e.g. "org.synapse.nf-" + "scrnaseqtemplate" → "org.synapse.nf-scrnaseqtemplate"
+    uri_prefix: "org.synapse.nf-"
+    # GitHub API URL listing available schema templates as JSON files
+    metadata_dictionary_url: "https://api.github.com/repos/nf-osi/nf-metadata-dictionary/contents/registered-json-schemas"
+
+annotations:
+  # Portal-controlled vocabulary for disease focus annotation.
+  # Replace with valid values from your portal's annotation dictionary.
+  disease_focus_values:
+    - "Neurofibromatosis type 1"
+    - "Neurofibromatosis type 2"
+    - "Schwannomatosis"
+    - "MPNST"
+  # Portal-controlled vocabulary for disease manifestation annotation.
+  manifestation_values:
+    - "MPNST"
+    - "Plexiform Neurofibroma"
+    - "Low-Grade Glioma NOS"
+    - "Behavioral"
+    - "Cognition"
+    - "Memory"
+    - "Pain"
 
 notifications:
-  jira:
+  github:
     enabled: true
-    project_key: "NFOSI"
-    issue_type: "Task"
-    assignee_email: "nf-osi@sagebionetworks.org"
-    # Summary template for new study tickets
-    summary_template: "Review auto-discovered study: {study_name} ({repository}:{accession_id})"
+    # GitHub org/team to mention on new study review issues (gets notified)
+    # Format: org/team-slug — must be a team within the repo's org
+    team_mention: "nf-osi/dcc-team"
+    # Labels automatically applied to new study-review issues
+    # 'approved' label triggers the provision_study.yml workflow
+    labels:
+      new_study: ["study-review", "automated"]
+      dataset_added: ["study-review", "dataset-added", "automated"]
 
 connectors:
   pubmed_geo:
     enabled: true
-    email: "nf-data-contributor@sagebionetworks.org"
   sra:
     enabled: true
   dbgap:
@@ -71,6 +110,19 @@ connectors:
     enabled: true
   pdc:
     enabled: true
+  datacite:
+    enabled: true
+    # Catches institutional repos (Science Data Bank, TIB, IFJ PAN, CORA, Dryad, etc.)
+    # via a single API: https://api.datacite.org/dois?query={term}&resource-type-id=dataset
+  massive:
+    enabled: true
+    # Proteomics datasets not already found via PRIDE
+  nci_gdc:
+    enabled: true
+    # TCGA/NCI controlled-access cancer genomics; filter by disease_type or primary_site
+  cell_image_library:
+    enabled: true
+    # Microscopy image datasets: https://cellimagelibrary.org/api/search?term={term}
 
 logging:
   level: "INFO"

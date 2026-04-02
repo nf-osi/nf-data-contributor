@@ -1,4 +1,4 @@
-# NF Data Contributor Agent — Daily Run
+# Data Contributor Agent — Daily Run
 
 **Today's date:** {{TODAY}}
 **Search for publications/datasets since:** {{LOOKBACK_DATE}}
@@ -11,34 +11,40 @@
 > **Seed ID:** `{{SEED_ID}}`
 >
 > - If the Seed ID above is **empty or blank**: run the full discovery pipeline (Steps 2–9).
-> - If the Seed ID is a **PMID** (all digits, e.g. `12345678`): skip Steps 2–3. Write and run `/tmp/nf_agent/seed_lookup.py` — fetch the PubMed record, resolve linked datasets via elink + Europe PMC + DataBankList, build `publication_groups.json`, then jump to Step 4.
-> - If the Seed ID is a **repository accession** (e.g. `GSE123456`, `PXD012345`, `PRJNA123456`, `E-MTAB-1234`): skip Steps 2–3. Write and run `/tmp/nf_agent/seed_lookup.py` — fetch metadata from the appropriate repository API, look up the associated PMID/DOI if available, build `publication_groups.json`, then jump to Step 4.
+> - If the Seed ID is a **PMID** (all digits, e.g. `12345678`): skip Steps 2–3. Write and run `{WORKSPACE_DIR}/seed_lookup.py` — fetch the PubMed record, resolve linked datasets via elink + Europe PMC + DataBankList, build `publication_groups.json`, then jump to Step 4.
+> - If the Seed ID is a **repository accession** (e.g. `GSE123456`, `PXD012345`, `PRJNA123456`, `E-MTAB-1234`): skip Steps 2–3. Write and run `{WORKSPACE_DIR}/seed_lookup.py` — fetch metadata from the appropriate repository API, look up the associated PMID/DOI if available, build `publication_groups.json`, then jump to Step 4.
 
-Write Python scripts to `/tmp/nf_agent/` and execute them. Refer to CLAUDE.md for all API patterns, auth, annotation schemas, and safety rules.
+Write Python scripts to the workspace directory (`agent.workspace_dir` from `config/settings.yaml`) and execute them. Refer to CLAUDE.md for all API patterns, auth, annotation schemas, and safety rules.
 
 ---
 
 ## Step 1 — Setup
 
 ```
-mkdir -p /tmp/nf_agent
 pip install synapseclient httpx biopython pyyaml scikit-learn anthropic --quiet
 ```
 
-Write and run `/tmp/nf_agent/setup.py`:
-1. Authenticate with Synapse via `lib/synapse_login.py` — print the logged-in username
-2. Get or create state tables via `lib/state_bootstrap.py`. If `STATE_PROJECT_ID` is empty, create a Synapse project named "NF DataContributor Agent State" and use it.
-3. Load all previously processed accession IDs into a Python set
-4. Save table IDs, accession set, and state project ID to `/tmp/nf_agent/state.json`
-5. Print: "Setup complete. Previously processed: N accessions"
+Read `config/settings.yaml` to get `WORKSPACE_DIR = agent.workspace_dir` and `STATE_TABLE_PREFIX = agent.state_table_prefix`, then:
+
+```
+mkdir -p {WORKSPACE_DIR}
+```
+
+Write and run `{WORKSPACE_DIR}/setup.py`:
+1. Read `config/settings.yaml` for all runtime config (workspace_dir, state_table_prefix, state_project_name, etc.)
+2. Authenticate with Synapse via `lib/synapse_login.py` — print the logged-in username
+3. Get or create state tables via `lib/state_bootstrap.py` passing `table_prefix` from config. If `STATE_PROJECT_ID` is empty, create a Synapse project named per `agent.state_project_name` in config and use it.
+4. Load all previously processed accession IDs into a Python set
+5. Save table IDs, accession set, and state project ID to `{WORKSPACE_DIR}/state.json`
+6. Print: "Setup complete. Previously processed: N accessions"
 
 ---
 
 ## Step 2 — PRIMARY DISCOVERY: PubMed + elink + Europe PMC
 
-Write and run `/tmp/nf_agent/discover_primary.py`.
+Write and run `{WORKSPACE_DIR}/discover_primary.py`.
 
-This is the main discovery path. The goal is: find all NF/SWN publications from the lookback window, then systematically resolve every data deposit associated with each paper.
+This is the main discovery path. The goal is: find all domain-relevant publications from the lookback window (using the PubMed MeSH query from `config/keywords.yaml`), then systematically resolve every data deposit associated with each paper.
 
 ### 2a — Search PubMed
 
@@ -83,9 +89,9 @@ Primary discovery complete:
 
 ## Step 3 — SECONDARY DISCOVERY: Repository-direct (unpublished/preprint data)
 
-Write and run `/tmp/nf_agent/discover_secondary.py`.
+Write and run `{WORKSPACE_DIR}/discover_secondary.py`.
 
-Query these repositories with NF keywords for datasets published since `{{LOOKBACK_DATE}}`. For each result, check if it has a PMID or DOI that was already found in the primary path — if so, skip it (it's already covered). Only keep datasets with no associated publication yet.
+Query these repositories with keywords from `config/keywords.yaml` (`search_terms`) for datasets published since `{{LOOKBACK_DATE}}`. For each result, check if it has a PMID or DOI that was already found in the primary path — if so, skip it (it's already covered). Only keep datasets with no associated publication yet.
 
 Repositories to query:
 - Zenodo (`https://zenodo.org/api/records`) — search `resource_type.type:dataset`
@@ -94,7 +100,11 @@ Repositories to query:
 - ArrayExpress/BioStudies (`https://www.ebi.ac.uk/biostudies/api/v1/search`)
 - PRIDE (`https://www.ebi.ac.uk/pride/ws/archive/v2/projects`)
 - MetaboLights (`https://www.ebi.ac.uk/metabolights/ws`)
-- NCI PDC (GraphQL — filter for NF disease types)
+- NCI PDC (GraphQL — filter for disease types from `config/keywords.yaml`)
+- **DataCite API** (`https://api.datacite.org/dois?query={term}&resource-type-id=dataset&page[size]=50`) — catches institutional and national repos not otherwise queryable (Science Data Bank, TIB, IFJ PAN, CORA, Dryad, University institutional repos, etc.). Filter `S-EPMC*` accessions as always.
+- **MassIVE** (`https://massive.ucsd.edu/ProteoSAFe/QueryDatasets?query={term}`) — proteomics datasets not already found via PRIDE
+- **NCI GDC** (`https://api.gdc.cancer.gov/cases?filters=...`) — filter by disease type and primary site from `config/keywords.yaml`
+- **Cell Image Library** (`https://cellimagelibrary.org/api/search?term={term}`) — microscopy image datasets
 
 For unpublished results, create publication groups with `pmid: null`, using the repository title as the publication title.
 
@@ -104,7 +114,7 @@ Print: `Secondary discovery: N additional datasets (no associated publication)`
 
 ## Step 4 — Deduplicate Against Portal
 
-Write and run `/tmp/nf_agent/dedup.py`:
+Write and run `{WORKSPACE_DIR}/dedup.py`:
 
 1. Load all publication groups from Steps 2 and 3
 2. Remove any group whose accession_ids are all already in the processed accessions set from state.json
@@ -114,7 +124,7 @@ Write and run `/tmp/nf_agent/dedup.py`:
    - **DOI match** (case-insensitive)
    - **Accession match** in portal files table
    - **Fuzzy title** (TF-IDF cosine ≥ 0.85 = match; 0.70–0.84 = near-match warning, treat as NEW)
-5. Save to `/tmp/nf_agent/dedup_results.json`
+5. Save to `{WORKSPACE_DIR}/dedup_results.json`
 6. Print:
    ```
    Dedup: N new | M add-to-existing | K skip | J near-match warnings
@@ -126,13 +136,13 @@ Write and run `/tmp/nf_agent/dedup.py`:
 
 ## Step 5 — Score Relevance
 
-Write and run `/tmp/nf_agent/score.py`:
+Write and run `{WORKSPACE_DIR}/score.py`:
 
 1. Score all groups in the `new` and `add` lists from dedup_results.json
 2. For groups with a PMID, use the PubMed abstract (already fetched in Step 2) — this is the richest scoring input
 3. Call `claude-sonnet-4-6` with the publication-level scoring prompt from CLAUDE.md
 4. Apply filters: score ≥ 0.70, is_primary_data = true, sample_count ≥ 3 (if known)
-5. Save approved + rejected groups to `/tmp/nf_agent/scored.json`
+5. Save approved + rejected groups to `{WORKSPACE_DIR}/scored.json`
 6. Print each result:
    ```
    [NEW][APPROVED]  "Pembrolizumab in MPNSTs" (PMID:41760889) — 0.95 — 2 datasets: GEO:GSE301187, SRA:SRP123
@@ -144,7 +154,7 @@ Write and run `/tmp/nf_agent/score.py`:
 
 ## Step 6 — Create / Update Synapse Projects
 
-Write and run `/tmp/nf_agent/synapse_actions.py`:
+Write and run `{WORKSPACE_DIR}/synapse_actions.py`:
 
 For each approved group (max 50 write operations total):
 
@@ -165,7 +175,7 @@ For each approved group (max 50 write operations total):
 - Agent-created project: add new dataset subfolder to its `Raw Data/` folder
 - Portal-managed project: create [Manual] JIRA ticket, skip write
 
-Save `/tmp/nf_agent/created_projects.json` with the full schema defined in `prompts/synapse_workflow.md` (project_id, project_name, pmid, doi, abstract, outcome, datasets[]).
+Save `{WORKSPACE_DIR}/created_projects.json` with the full schema defined in `prompts/synapse_workflow.md` (project_id, project_name, pmid, doi, abstract, outcome, datasets[]).
 Print each action: `Created: "Project Name" (synXXX) — N datasets, M files`
 
 ---
@@ -176,7 +186,7 @@ Print each action: `Created: "Project Name" (synXXX) — N datasets, M files`
 
 This step checks every project created in Step 6 against the completion checklist and fixes any issues found. Run it in three sub-steps:
 
-### 7a — Write and run `/tmp/nf_agent/audit.py` (Phase 1)
+### 7a — Write and run `{WORKSPACE_DIR}/audit.py` (Phase 1)
 
 The audit script (code in `prompts/synapse_workflow.md`):
 - Fetches the current state of every project, dataset, and file entity created this run
@@ -187,7 +197,7 @@ The audit script (code in `prompts/synapse_workflow.md`):
   - `studyName` missing → set from project name
   - `fundingAgency` missing → `Not Applicable (External Study)`
   - `pmid`/`doi` missing but known → set from project metadata
-  - NF-OSI team permissions (3378999) missing → grant
+  - Data manager team permissions (`synapse.team_id` from config) missing → grant
   - Dataset `items` empty → re-link from files folder
   - Dataset `columnIds` missing → create columns
   - Dataset entity annotations missing → set defaults
@@ -198,11 +208,11 @@ The audit script (code in `prompts/synapse_workflow.md`):
   - `specimenID`/`individualID` parseable from filename (GSM/SRR/ERR prefix) → set
   - Schema binding missing → bind the schema
 - **Collects context** for issues that require reasoning (annotation fields that need domain knowledge)
-- Prints a structured report and writes `/tmp/nf_agent/audit_results.json`
+- Prints a structured report and writes `{WORKSPACE_DIR}/audit_results.json`
 
 ### 7b — Agent reasoning (Phase 2)
 
-After running `audit.py`, read `/tmp/nf_agent/audit_results.json`. For each project with `reasoning_gaps`:
+After running `audit.py`, read `{WORKSPACE_DIR}/audit_results.json`. For each project with `reasoning_gaps`:
 
 1. Read the available context: abstract (stored in audit_results), project annotations, wiki
 2. If PMID is known and abstract is missing, fetch it from PubMed
@@ -217,9 +227,9 @@ After running `audit.py`, read `/tmp/nf_agent/audit_results.json`. For each proj
    - `libraryPreparationMethod` → look for kit/method names in abstract ("10x Chromium", "Smart-seq2", "polyA")
    - `specimenID` where auto-parse failed → look at repository sample metadata (GEO GSM table, SRA BioSample)
    - `wiki` missing → create from wiki template (in `prompts/synapse_workflow.md`) using available metadata
-4. Write `/tmp/nf_agent/audit_reasoning_fixes.json` with all resolved values
+4. Write `{WORKSPACE_DIR}/audit_reasoning_fixes.json` with all resolved values
 
-### 7c — Write and run `/tmp/nf_agent/apply_audit_fixes.py` (Phase 3)
+### 7c — Write and run `{WORKSPACE_DIR}/apply_audit_fixes.py` (Phase 3)
 
 The apply script (code in `prompts/synapse_workflow.md`):
 - Reads `audit_reasoning_fixes.json`
@@ -242,16 +252,16 @@ Warnings remaining: N
 
 ## Step 8 — JIRA Notifications
 
-Write and run `/tmp/nf_agent/notify.py`. Attempt ticket creation; log 401/placeholder errors as warnings and continue.
+Write and run `{WORKSPACE_DIR}/notify.py`. Attempt ticket creation; log 401/placeholder errors as warnings and continue.
 
 ---
 
 ## Step 9 — Update State Tables
 
-Write and run `/tmp/nf_agent/update_state.py`. Record every accession evaluated. Append run summary row. Print:
+Write and run `{WORKSPACE_DIR}/update_state.py`. Record every accession evaluated. Append run summary row. Print:
 
 ```
-=== NF Data Contributor Agent — Run Complete ===
+=== NADIA — Run Complete ===
 Date: {{TODAY}}
 Publications scanned (PubMed): N
 Publications with data: N

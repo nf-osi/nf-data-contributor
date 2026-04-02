@@ -1,0 +1,67 @@
+name: NADIA — Provision Approved Study
+
+# Triggered when a data manager applies the 'approved' label to a study-review issue.
+# Runs pure Python code — no LLM calls.
+
+on:
+  issues:
+    types: [labeled]
+
+jobs:
+  provision:
+    # Only run when 'approved' label is added to a study-review issue
+    if: |
+      github.event.label.name == 'approved' &&
+      contains(github.event.issue.labels.*.name, 'study-review')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    permissions:
+      issues: write      # post comment + close issue
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: lib/requirements.txt
+
+      - name: Install Python dependencies
+        run: pip install -r lib/requirements.txt
+
+      - name: Run provisioning
+        run: |
+          python scripts/provision_approved_study.py \
+            --issue-number ${{ github.event.issue.number }}
+        env:
+          SYNAPSE_AUTH_TOKEN: ${{ secrets.SYNAPSE_AUTH_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          STATE_PROJECT_ID: ${{ vars.STATE_PROJECT_ID }}
+          AGENT_REPO_ROOT: ${{ github.workspace }}
+
+      - name: Post failure comment
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: [
+                '## ❌ Provisioning workflow failed',
+                '',
+                `The provisioning GitHub Actions run encountered an error. [View logs](${runUrl})`,
+                '',
+                'Please investigate and re-trigger by removing and re-applying the `approved` label,',
+                'or provision manually via Synapse.',
+              ].join('\n'),
+            });

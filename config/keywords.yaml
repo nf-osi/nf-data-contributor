@@ -1,0 +1,66 @@
+# Disease Domain Keywords — used for repository searches and PubMed queries
+# Replace all values in this file to target a different disease domain.
+# Organized by category; all repository searches apply OR logic across the flat search_terms list.
+
+# Full PubMed/Entrez query used for the primary discovery step.
+# Use MeSH terms where possible for precision; add free-text [tiab] terms for emerging terminology.
+# The agent appends a date filter to this query at runtime.
+pubmed_mesh_query: >-
+  ("Neurofibromatoses"[MeSH] OR "Neurofibromatosis 1"[MeSH] OR "Neurofibromatosis 2"[MeSH]
+   OR "Neurofibrosarcoma"[MeSH] OR neurofibromatosis[tiab] OR "NF1"[tiab] OR "NF2"[tiab]
+   OR schwannomatosis[tiab] OR "MPNST"[tiab] OR "malignant peripheral nerve sheath"[tiab]
+   OR "plexiform neurofibroma"[tiab] OR "vestibular schwannoma"[tiab]
+   OR "acoustic neuroma"[tiab] OR SMARCB1[tiab] OR LZTR1[tiab] OR neurofibromin[tiab])
+
+disease_names:
+  - "neurofibromatosis"
+  - "neurofibromatosis type 1"
+  - "neurofibromatosis type 2"
+  - "NF1"
+  - "NF2"
+  - "schwannomatosis"
+  - "SMARCB1 loss"
+  - "LZTR1"
+
+tumor_types:
+  - "plexiform neurofibroma"
+  - "cutaneous neurofibroma"
+  - "vestibular schwannoma"
+  - "acoustic neuroma"
+  - "malignant peripheral nerve sheath tumor"
+  - "MPNST"
+  - "spinal ependymoma"
+  - "meningioma NF2"
+  - "spinal schwannoma"
+
+gene_symbols:
+  - "NF1 gene"
+  - "NF2 gene"
+  - "SMARCB1"
+  - "LZTR1"
+  - "SPRED1"
+  - "merlin"
+  - "neurofibromin"
+
+# Combined flat list used at runtime for repository keyword searches (Zenodo, Figshare, etc.)
+search_terms:
+  - "neurofibromatosis"
+  - "neurofibromatosis type 1"
+  - "neurofibromatosis type 2"
+  - "NF1"
+  - "NF2"
+  - "schwannomatosis"
+  - "SMARCB1 loss"
+  - "LZTR1"
+  - "plexiform neurofibroma"
+  - "cutaneous neurofibroma"
+  - "vestibular schwannoma"
+  - "acoustic neuroma"
+  - "malignant peripheral nerve sheath tumor"
+  - "MPNST"
+  - "spinal ependymoma"
+  - "meningioma NF2"
+  - "spinal schwannoma"
+  - "SMARCB1"
+  - "neurofibromin"
+  - "merlin NF"
