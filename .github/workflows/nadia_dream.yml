@@ -1,0 +1,89 @@
+name: NADIA Dream — Weekly Self-Improvement
+
+# Runs every Sunday at 3 AM UTC. Reviews /nadia fix: commands from the past
+# week, identifies recurring annotation errors, and has Claude Code make
+# targeted improvements to NADIA's instructions and audit logic.
+# Changes are proposed as a pull request to main for human review.
+
+on:
+  schedule:
+    - cron: '0 3 * * 0'   # 3:00 AM UTC every Sunday
+  workflow_dispatch:
+    inputs:
+      lookback_days:
+        description: 'Number of days of fix commands to review (default: 7)'
+        required: false
+        default: '7'
+
+jobs:
+  dream:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    permissions:
+      issues: read
+      contents: write        # push branch
+      pull-requests: write   # create PR
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Fetch full history so Claude Code can create branches cleanly
+          fetch-depth: 0
+
+      - name: Set up Node.js (for Claude Code CLI)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: lib/requirements.txt
+
+      - name: Install Python dependencies
+        run: pip install -r lib/requirements.txt
+
+      - name: Install Claude Code CLI
+        run: |
+          npm install -g @anthropic-ai/claude-code
+          echo "$(npm root -g)/../bin" >> "$GITHUB_PATH"
+
+      - name: Configure git identity
+        run: |
+          git config user.name  "NADIA Dream"
+          git config user.email "nadia-dream@sagebionetworks.org"
+
+      - name: Collect fix commands and write prompt
+        run: python3 scripts/nadia_dream_prep.py
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          LOOKBACK_DAYS: ${{ github.event.inputs.lookback_days || '7' }}
+          NADIA_WORKSPACE_DIR: /tmp/nf_agent
+
+      - name: Run Claude Code self-improvement
+        run: |
+          claude \
+            --permission-mode bypassPermissions \
+            --output-format stream-json \
+            --verbose \
+            --max-turns 40 \
+            --add-dir "${{ github.workspace }}" \
+            -p "$(cat /tmp/nf_agent/nadia_dream_prompt.md)"
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          AGENT_REPO_ROOT: ${{ github.workspace }}
+
+      - name: Upload dream artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nadia-dream-${{ github.run_id }}
+          path: /tmp/nf_agent/
+          retention-days: 30
