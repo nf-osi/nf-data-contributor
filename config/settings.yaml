@@ -34,9 +34,10 @@ discovery:
 
 deduplication:
   # Synapse table IDs for the live target portal — set for your portal instance
-  studies_table_id: "syn52694652"
-  files_table_id: "syn16858331"
-  datasets_table_id: "syn16859580"
+  studies_table_id: "syn52694652"        # MaterializedView — read-only, fed by studies_source_view_id
+  studies_source_view_id: "syn52677631"  # ProjectView — add NADIA project IDs here to surface in portal
+  files_table_id: "syn16858331"          # Files FileView — scopeIds are numeric (no 'syn' prefix)
+  # datasets_table_id "syn16859580" removed — entity does not exist (404)
   # TF-IDF cosine similarity threshold for fuzzy title matching
   fuzzy_title_threshold: 0.85
 
