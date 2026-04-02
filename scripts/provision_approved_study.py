@@ -163,11 +163,18 @@ def step1_update_resource_status(syn, project_id, metadata):
     datasets = get_children_rest(syn, project_id, types=["dataset"])
     for ds in datasets:
         try:
+            # Use the Dataset entity's own name as the title so that each dataset
+            # gets a distinct, accession-specific title in the DatasetCollection.
+            # (Setting title=study_name made every dataset show the same publication
+            # title in the portal.)
+            ds_entity = syn.restGET(f"/entity/{ds['id']}")
+            ds_name = ds_entity.get("name", study_name)
+
             raw = syn.restGET(f"/entity/{ds['id']}/annotations2")
             ann = raw.get("annotations", {})
             ann["resourceStatus"] = {"type": "STRING", "value": ["approved"]}
             ann["studyId"]  = {"type": "STRING", "value": [project_id]}
-            ann["title"]    = {"type": "STRING", "value": [study_name]}
+            ann["title"]    = {"type": "STRING", "value": [ds_name]}
             ann["creator"]  = {"type": "STRING", "value": study_leads}
             raw["annotations"] = ann
             syn.restPUT(f"/entity/{ds['id']}/annotations2", json.dumps(raw))
@@ -500,9 +507,23 @@ def step6_add_to_dataset_collection(syn, project_id, collection_id):
             if ds_id in existing_ids:
                 print(f"  Dataset {ds_id} already in collection — skipping")
                 continue
-            # Get current version number
-            ds_entity = syn.restGET(f"/entity/{ds_id}")
-            version = ds_entity.get("versionNumber", 1)
+            # Mint a new stable snapshot so the DatasetCollection references a
+            # real versioned snapshot rather than a draft versionNumber which may
+            # not correspond to a stable snapshot (draft versions cause "0 Bytes"
+            # / "version does not exist" errors in the portal DatasetCollection).
+            # Dataset entities are table-type entities — use the Python client's
+            # create_snapshot_version() which calls the async table/transaction
+            # endpoint correctly.
+            try:
+                version = syn.create_snapshot_version(ds_id, comment="portal-approved")
+                print(f"  Minted snapshot v{version} for {ds_id}")
+            except Exception as snap_err:
+                # If snapshot creation fails (e.g. entity is already at a stable
+                # version with no pending changes), fall back to the current version.
+                print(f"  WARN: could not mint snapshot for {ds_id}: {snap_err} — "
+                      f"falling back to current versionNumber", file=sys.stderr)
+                ds_entity = syn.restGET(f"/entity/{ds_id}")
+                version = ds_entity.get("versionNumber", 1)
             items.append({"entityId": ds_id, "versionNumber": version})
             added += 1
             print(f"  Queued {ds_id} (version {version}) for collection")
@@ -522,7 +543,27 @@ def step6_add_to_dataset_collection(syn, project_id, collection_id):
         return False
 
 
-def step7_update_state_table(syn, cfg, project_id):
+def step7_set_public_permissions(syn, project_id):
+    """Set standard NF portal public permissions on the project:
+      - PUBLIC (273948):          READ + DOWNLOAD  (anyone can view and download)
+      - AUTHENTICATED_USERS (273949): READ          (explicit entry for logged-in users)
+    """
+    PUBLIC        = 273948
+    AUTHENTICATED = 273949
+    try:
+        syn.setPermissions(project_id, principalId=PUBLIC,
+                           accessType=["READ", "DOWNLOAD"], warn_if_inherits=False)
+        syn.setPermissions(project_id, principalId=AUTHENTICATED,
+                           accessType=["READ"], warn_if_inherits=False)
+        print(f"  {project_id}: PUBLIC → READ+DOWNLOAD, AUTHENTICATED_USERS → READ")
+        return True
+    except Exception as e:
+        print(f"  WARN: could not set public permissions on {project_id}: {e}",
+              file=sys.stderr)
+        return False
+
+
+def step8_update_state_table(syn, cfg, project_id):
     """Update NADIA state table rows for this project to status='approved'."""
     try:
         state_project_id = os.environ.get("STATE_PROJECT_ID", "")
@@ -579,6 +620,7 @@ def post_success_comment(issue_number, project_id, stats,
         f"| Study long-text populated | {status_icon(long_text_updated)} |",
         f"| Publication record upserted | {status_icon(pub_upserted)} |",
         f"| Added to Dataset Collection | {status_icon(collection_updated)} |",
+        f"| Public permissions set | ✅ PUBLIC → READ + DOWNLOAD |",
         f"| NADIA state table updated | {status_icon(state_updated)} |",
         f"| Errors | {'⚠️ ' + str(stats['errors']) if stats['errors'] else '✅ None'} |",
         "",
@@ -696,16 +738,20 @@ def main():
         syn_portal, project_id, dataset_collection_id
     )
 
-    # Step 7 — Update NADIA state table
-    print("\nStep 7: Updating NADIA state table...")
+    # Step 7 — Set public permissions (PUBLIC → READ + DOWNLOAD)
+    print("\nStep 7: Setting public permissions...")
+    step7_set_public_permissions(syn_portal, project_id)
+
+    # Step 8 — Update NADIA state table
+    print("\nStep 8: Updating NADIA state table...")
     if syn_nadia:
-        state_updated = step7_update_state_table(syn_nadia, cfg, project_id)
+        state_updated = step8_update_state_table(syn_nadia, cfg, project_id)
     else:
         state_updated = False
         print("  Skipped (SYNAPSE_AUTH_TOKEN not available)")
 
-    # Step 8 — Post completion comment and close issue
-    print("\nStep 8: Posting completion comment and closing issue...")
+    # Step 9 — Post completion comment and close issue
+    print("\nStep 9: Posting completion comment and closing issue...")
     post_success_comment(
         issue_number, project_id, stats,
         studies_view_added, files_view_added,
