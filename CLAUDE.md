@@ -568,6 +568,12 @@ Each repository accession → one Dataset entity (direct child of project) + one
 | `dataSubtype` | Yes | `raw` / `processed` / `normalized` |
 | `platform` | Yes | must match schema enum |
 | `libraryPreparationMethod` | Yes | must match schema enum |
+| `modelSystemName` | Yes (model organism studies) | strain/line name e.g. `"C57BL/6"` — fetch from sample characteristics |
+| `assayTarget` | Yes (ChIP-seq/CUT&RUN/ATAC-seq) | antibody target e.g. `H3K27ac` — fetch from GEO protocol or ENA library fields |
+
+> **NEVER set on File entities:**
+> - `resourceStatus` — belongs only on the **Project** and **Dataset entity**. Setting it on files creates a spurious column in the Datasets tab that data managers must manually remove.
+> - `filename` — do NOT add as a custom annotation. The Synapse system `name` property IS the filename column in Dataset views.
 
 **Only set enum values that exist in the schema** — fetch at runtime from `https://repo-prod.prod.sagebase.org/repo/v1/schema/type/registered/{schema_uri}`.
 
@@ -789,13 +795,20 @@ Before logging `synapse_created` or `dataset_added`, verify:
 ### Per dataset (repeat for each accession)
 - [ ] `Raw Data/{Repo}_{AccessionID}_files/` folder exists with File entities
 - [ ] Each File entity has: `study`, `assay`, `species`, `tumorType`, `diagnosis`, `fileFormat`, `resourceType`, `externalAccessionID`, `externalRepository`, `specimenID` (one per file), `individualID` (one per file)
+- [ ] **No File entity has `resourceStatus`** — it must NOT be set on files (only on Project + Dataset entity)
+- [ ] **No File entity has a custom `filename` annotation** — use the Synapse system `name` column instead
 - [ ] `fileFormat` strips compression suffixes (`fastq.gz` → `fastq`, `txt.gz` → `txt`)
 - [ ] `tumorType` set on every file
 - [ ] `specimenID` is per-file, not a multi-value list
+- [ ] For model organism studies: `modelSystemName`, `modelSpecies`, `modelSex` set on all files
+- [ ] For ChIP-seq/CUT&RUN/ATAC-seq: `assayTarget` set on all files
 - [ ] No file has `needsExtraction` as its only/final annotation
 - [ ] Dataset entity (`org.sagebionetworks.repo.model.table.Dataset`) is a **direct child of the project**
+- [ ] Dataset entity name is human-readable: format `{assay} — {context} ({repo} {accession})`
 - [ ] Dataset entity `items` field populated with all File entity IDs
-- [ ] Dataset entity has `columnIds` set
+- [ ] Dataset entity has `columnIds` set (expanded 23-column set including `assayTarget`)
 - [ ] Dataset entity annotated: `contentType`, `externalAccessionID`, `externalRepository`, `resourceStatus`, `study`
+- [ ] Stable version minted on Dataset entity via `POST /entity/{id}/version`
 - [ ] NF schema bound to the **files folder** via `bind_json_schema(schema_uri, files_folder_id)`
 - [ ] Schema binding verified via `js.validate(files_folder_id)`
+- [ ] No empty folders exist in the project (no `Analysis/` or other placeholder folders)

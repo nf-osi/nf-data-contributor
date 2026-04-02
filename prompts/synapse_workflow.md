@@ -20,6 +20,8 @@ This file contains the detailed Synapse entity creation steps, annotation vocabu
 └── Source Metadata/
 ```
 
+**Never create an `Analysis/` folder or any other placeholder folder that would be left empty.** Only create `Raw Data/` and `Source Metadata/` — both of which will be populated.
+
 ### Step 1 — Create the files folder and populate it
 
 ```python
@@ -44,7 +46,7 @@ for filename, download_url in file_list:
 ```python
 import json
 
-# Human-readable Dataset name — assay type + repository/accession
+# Human-readable Dataset name — assay type + context + repository/accession
 # normalized_annotations['assay'] is already set from Step D
 assay_label = normalized_annotations.get('assay', 'Data')
 if isinstance(assay_label, list):
@@ -53,9 +55,24 @@ species_label = normalized_annotations.get('species', '')
 if isinstance(species_label, list):
     species_label = ', '.join(species_label)
 
+# Include disease/tissue context to make the name human-readable at a glance.
+# For ChIP-seq: append the assay target (e.g. "ChIP-seq H3K27ac")
+# Priority: assayTarget > tumorType > organ > disease_focus (first value)
+context_parts = []
+assay_target = normalized_annotations.get('assayTarget', '')
+if assay_target:
+    context_parts.append(str(assay_target) if not isinstance(assay_target, list) else assay_target[0])
+tumor = normalized_annotations.get('tumorType', '')
+if tumor and not assay_target:
+    context_parts.append(str(tumor) if not isinstance(tumor, list) else tumor[0])
+if species_label and not context_parts:
+    context_parts.append(species_label.split(' ')[1] if ' ' in species_label else species_label)
+
+context_str = f" — {', '.join(context_parts)}" if context_parts else ""
+
 # Synapse name allows: letters, numbers, spaces, underscores, hyphens, periods,
 # plus signs, apostrophes, parentheses — NO em-dash, NO colon
-dataset_name = f"{assay_label} ({repository} {accession_id})"
+dataset_name = f"{assay_label}{context_str} ({repository} {accession_id})"
 dataset_name = dataset_name[:256]  # Synapse name limit
 
 # Description: one sentence covering what the data is, from where, and how many files
@@ -127,7 +144,9 @@ ANNOTATION_COLUMNS = [
     ('dataSubtype',              'STRING',  64, 'enumeration'),
     ('fileFormat',               'STRING',  64, 'enumeration'),
     ('resourceType',             'STRING',  64, 'enumeration'),
-    ('resourceStatus',           'STRING',  64, 'enumeration'),
+    # NOTE: resourceStatus is intentionally EXCLUDED from Dataset column definitions.
+    # It is an entity-level annotation on the Project and Dataset entity itself,
+    # NOT a per-file annotation. Never set resourceStatus on individual File entities.
     ('externalAccessionID',      'STRING', 128, None),           # one value per dataset — not a useful facet
     ('externalRepository',       'STRING',  64, 'enumeration'),
     ('specimenID',               'STRING', 128, None),           # high-cardinality identifier
@@ -136,6 +155,7 @@ ANNOTATION_COLUMNS = [
     ('modelSpecies',             'STRING', 128, 'enumeration'),
     ('modelSex',                 'STRING',  32, 'enumeration'),
     ('sex',                      'STRING',  32, 'enumeration'),
+    ('assayTarget',              'STRING', 128, 'enumeration'),  # ChIP-seq target (H3K27ac, CTCF, etc.)
 ]
 
 col_ids = []
@@ -163,6 +183,22 @@ validation = js.validate(files_folder.id)
 print(f"  Schema bound: {schema_uri}")
 ```
 
+### Step 6 — Mint a stable snapshot version of the Dataset
+
+After all annotations are confirmed correct, mint a stable version of the Dataset entity. This gives data managers a permanent, citable snapshot:
+
+```python
+import json
+
+# Snapshot the Dataset — creates a permanent version number
+snapshot_response = syn.restPOST(
+    f'/entity/{dataset_id}/version',
+    json.dumps({'label': 'v1', 'comment': 'Initial stable version from NADIA ingestion'})
+)
+snapshot_version = snapshot_response.get('versionNumber', 1)
+print(f"  Dataset snapshot minted: {dataset_id}.{snapshot_version}")
+```
+
 **Required order within create_project.py:**
 1. Create project → folders → File entities  (**no Dataset yet**)
 2. Apply annotations to each individual File entity  (**must happen before Dataset linking** — each `syn.store(f)` or `annotations2` PUT increments the file version; if the Dataset is linked first it will point to pre-annotation versions and show blank columns)
@@ -170,7 +206,8 @@ print(f"  Schema bound: {schema_uri}")
 4. Apply annotations to Dataset entity
 5. Set columnIds on Dataset entity
 6. `bind_nf_schema(syn, files_folder_id, schema_uri)` ← bind to FILES FOLDER
-7. Print validation result
+7. Mint stable version of Dataset entity (Step 6 above)
+8. Print validation result
 
 ---
 
@@ -256,6 +293,12 @@ def fetch_schema_enums(schema_uri: str) -> dict[str, list[str]]:
 - `{uri_prefix}behavioralassaytemplate` — covers both human clinical behavioral instruments AND animal model behavioral assays (open field test, rotarod, elevated plus maze, grooming, etc.). Use this for behavioral data of any species. Note: this schema always requires `compoundName`, `compoundDose`, and `compoundDoseUnit` — for non-drug studies, set these to `'Not Applicable'` / `'0'` / `'Not Applicable'` respectively. Also requires `dataType` (use `'behavioral data'` for behavioral studies).
 - `{uri_prefix}biologicalassaydatatemplate` — has no enum constraints at all; not useful for controlled-vocabulary annotation. Avoid.
 - `{uri_prefix}generalmeasuredatatemplate` — general quantitative measurements; has the broadest assay enum (202 values including RNA-seq, imaging, etc.).
+
+**ChIP-seq / CUT&RUN / ATAC-seq schema selection:**
+- If the metadata dictionary has an `epigenomicsassaytemplate` (or similar), use it for ChIP-seq, CUT&RUN, CUT&TAG, or ATAC-seq datasets.
+- The epigenomics template typically includes `assayTarget` (antibody target), `assayTargetDescription`, and `referenceSet` (genome build) fields not present in other templates.
+- If no epigenomics-specific template exists, fall back to `generalmeasuredatatemplate` and populate `assayTarget` as a free-text annotation.
+- Identify the assay target from: GEO `!Series_extract_protocol_ch1` (look for antibody name), ENA `library_selection` field, or the experiment title in BioStudies.
 
 ### Step A2 — Fetch ALL schema property names (not just enums)
 
@@ -527,9 +570,15 @@ for child in syn.getChildren(files_folder_id, includeTypes=['file']):
     syn.store(f)
 ```
 
-**Shared across all files** (values that are the same for every file in the dataset — check schema_props for exact field names): fields like `assay`, `species`, `diagnosis`, `tumorType`, `platform`, `libraryPreparationMethod`, `libraryStrand`, `libraryPrep`, `specimenPreparationMethod`, `dissociationMethod`, `study`, `externalAccessionID`, `externalRepository`, `dataSubtype`, `resourceStatus`, `sex`, `organ`, `isCellLine`, `isPrimaryCell`, `nucleicAcidSource`, `runType`, `readLength` — populate all that apply.
+**Shared across all files** (values that are the same for every file in the dataset — check schema_props for exact field names): fields like `assay`, `species`, `diagnosis`, `tumorType`, `platform`, `libraryPreparationMethod`, `libraryStrand`, `libraryPrep`, `specimenPreparationMethod`, `dissociationMethod`, `study`, `externalAccessionID`, `externalRepository`, `dataSubtype`, `sex`, `organ`, `isCellLine`, `isPrimaryCell`, `nucleicAcidSource`, `runType`, `readLength` — populate all that apply.
 
-**Model organism shared fields** (required for any mouse/rat/zebrafish study): `modelSpecies`, `modelSex`, `modelAgeUnit`, `modelSystemName`, `nf1Genotype`, `nf2Genotype`. Fetch from repository sample attributes at creation time — do not leave blank.
+> **CRITICAL — NEVER set on File entities:**
+> - **`resourceStatus`** — belongs ONLY on the Project and Dataset entity annotations. Setting it on files causes the Datasets tab to show a `resourceStatus` column with values that data managers must manually remove.
+> - **`filename`** — do NOT add a custom `filename` annotation. The Synapse system `name` property (set automatically from the file entity's name) IS the filename column in Dataset views. Adding `filename` as a custom annotation creates a duplicate, non-system column that data managers must remove.
+
+**Model organism shared fields** (required for any mouse/rat/zebrafish study): `modelSpecies`, `modelSex`, `modelAgeUnit`, `modelSystemName`, `nf1Genotype`, `nf2Genotype`. Fetch from repository sample attributes at creation time — do not leave blank. `modelSystemName` is especially important — this is the strain or line name (e.g. `"C57BL/6"`, `"NF1flox/flox;DhhCre"`) that data managers rely on for filtering.
+
+**ChIP-seq shared fields** (required for any ChIP-seq or CUT&RUN dataset): `assayTarget` — set to the antibody target from GEO `!Series_extract_protocol_ch1` or ENA `library_selection`/experiment title (e.g. `H3K27ac`, `H3K4me3`, `CTCF`, `EZH2`). This field enables faceted filtering by target in the portal.
 
 **Per-file** (values that differ per file): `fileFormat`, `specimenID`, `individualID`, `readPair` (I1/R1/R2 for 10x; R1/R2 for paired-end), `modelAge` (if age varies per sample), `batchID` (if batch varies per file), `aliquotID`
 
@@ -1019,6 +1068,14 @@ These issues were discovered when the audit was run on real agent-created projec
 
 13. **Dataset ANNOTATION_COLUMNS must include the expanded set** — The minimum 16-column list is insufficient for scRNA-seq and model organism data. The standard set is now 22 columns, adding: `nucleicAcidSource`, `organ`, `modelSpecies`, `modelSex`, `sex`, and any disease-specific genotype fields from the schema. Always use the full expanded column list.
 
+14. **`resourceStatus` must NOT be set on individual File entities** — Data managers have consistently requested removal of `resourceStatus` from all files. This annotation belongs only on the **Project** and **Dataset entity** (as an entity-level annotation). The audit Phase 1 auto-fix now **removes** `resourceStatus` from any file that has it. Do not set it during creation either (see the CRITICAL note in Step D above).
+
+15. **`filename` annotation causes duplicate columns** — Do NOT add a custom `filename` annotation to files. The Synapse system `name` property serves as the filename in Dataset views. Adding `filename` as a custom annotation creates a second column that data managers must manually clean up. The audit Phase 1 auto-fix removes `filename` annotations from files.
+
+16. **Dataset names must be descriptive** — Names like `GEO_GSE120686` are not human-readable. Use the format `{assay_label} — {context} ({repository} {accession_id})` where context is the tumor type, disease, or assay target (for ChIP-seq). For example: `"RNA-seq — MPNST (GEO GSE120686)"` or `"ChIP-seq H3K27ac — NF1 (GEO GSE120686)"`. The Dataset name is the first thing a data manager sees in the Datasets tab.
+
+17. **Mint a stable Dataset version after all annotations are final** — After creating or updating a Dataset and confirming all annotations are correct, call `syn.restPOST(f'/entity/{dataset_id}/version', ...)` to mint a permanent snapshot. This gives data managers a stable, citable version to reference. Data managers will request this explicitly if it is missing.
+
 ### `created_projects.json` Schema (output of Step 6, input to audit)
 
 Step 6 must write this file. The audit reads it:
@@ -1080,7 +1137,7 @@ ANNOTATION_COLUMNS = [
     ('dataSubtype',              'STRING',  64, 'enumeration'),
     ('fileFormat',               'STRING',  64, 'enumeration'),
     ('resourceType',             'STRING',  64, 'enumeration'),
-    ('resourceStatus',           'STRING',  64, 'enumeration'),
+    # resourceStatus intentionally excluded — belongs on project/dataset entity, NOT on files
     ('externalAccessionID',      'STRING', 128, None),
     ('externalRepository',       'STRING',  64, 'enumeration'),
     ('specimenID',               'STRING', 128, None),
@@ -1089,6 +1146,7 @@ ANNOTATION_COLUMNS = [
     ('modelSpecies',             'STRING', 128, 'enumeration'),
     ('modelSex',                 'STRING',  32, 'enumeration'),
     ('sex',                      'STRING',  32, 'enumeration'),
+    ('assayTarget',              'STRING', 128, 'enumeration'),  # ChIP-seq target
 ]
 
 # Fields auto-fixable without reasoning (value is deterministic)
@@ -1241,9 +1299,15 @@ for proj in created:
                     return v[0] if isinstance(v, list) and v else (v or '')
 
                 # Auto-fixes
-                if not _scalar(ann_dict.get('resourceStatus')):
-                    fe.annotations['resourceStatus'] = 'pendingReview'
-                    file_gap['fixes'].append('resourceStatus → pendingReview'); changed = True
+                # resourceStatus must NOT be on File entities — REMOVE it if present
+                if 'resourceStatus' in ann_dict:
+                    del fe.annotations['resourceStatus']
+                    file_gap['fixes'].append('resourceStatus REMOVED (belongs on project/dataset, not files)'); changed = True
+
+                # Also remove any custom 'filename' annotation — use Synapse system 'name' instead
+                if 'filename' in ann_dict:
+                    del fe.annotations['filename']
+                    file_gap['fixes'].append('filename annotation REMOVED (use system name column)'); changed = True
 
                 if not _scalar(ann_dict.get('resourceType')):
                     fe.annotations['resourceType'] = 'experimentalData'
@@ -1608,6 +1672,36 @@ for proj_fix in fixes:
         except Exception as e:
             print(f"  File {file_fix['file_id']} fix failed: {e}")
 
+    # After fixing file annotations, sync Dataset item versions and mint a stable snapshot
+    for ds_fix in proj_fix.get('dataset_ids_to_snapshot', []):
+        dataset_id = ds_fix.get('dataset_id')
+        if not dataset_id:
+            continue
+        try:
+            # Sync item versions (file annotations may have incremented file versions)
+            ds_body = syn.restGET(f'/entity/{dataset_id}')
+            if ds_body.get('items'):
+                updated_items = []
+                for item in ds_body['items']:
+                    eid = item['entityId']
+                    fe = syn.get(eid, downloadFile=False)
+                    updated_items.append({
+                        'entityId': eid,
+                        'versionNumber': fe.properties.get('versionNumber', 1)
+                    })
+                ds_body2 = syn.restGET(f'/entity/{dataset_id}')
+                ds_body2['items'] = updated_items
+                syn.restPUT(f'/entity/{dataset_id}', json.dumps(ds_body2))
+                print(f"  Dataset {dataset_id}: item versions synced")
+            # Mint stable version
+            snap = syn.restPOST(
+                f'/entity/{dataset_id}/version',
+                json.dumps({'label': 'v1', 'comment': 'Stable version after NADIA annotation review'})
+            )
+            print(f"  Dataset {dataset_id}: stable version minted → v{snap.get('versionNumber', '?')}")
+        except Exception as e:
+            print(f"  Dataset {dataset_id} snapshot failed: {e}")
+
 print(f"\nApply complete: {total_projects} projects, {total_files} files updated.")
 ```
 
@@ -1628,7 +1722,7 @@ syn74287500 — Example Study Title
   Warnings: 0
 
 syn74287507 — Developmental loss of neurofibromin across neural circuits
-  Auto-fixes: resourceStatus set on 20 files
+  Auto-fixes: resourceStatus REMOVED from 20 files (was incorrectly set on files)
   Reasoning gaps: none
   Warnings: 0
 
