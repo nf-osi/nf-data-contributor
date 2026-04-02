@@ -580,6 +580,9 @@ Each repository accession → one Dataset entity (direct child of project) + one
 | `externalRepository` | {source_repository} |
 | `resourceStatus` | `pendingReview` |
 | `study` | {project_name} |
+| `studyId` | {synapse_project_id} |
+| `title` | {publication_title} |
+| `creator` | list of study leads (first + last/corresponding author) |
 
 ---
 

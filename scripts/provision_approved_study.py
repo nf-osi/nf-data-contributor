@@ -138,12 +138,17 @@ def update_resource_status(syn, entity_id, new_status="approved"):
 
 # ── Core provisioning steps ────────────────────────────────────────────────────
 
-def step1_update_resource_status(syn, project_id):
+def step1_update_resource_status(syn, project_id, metadata):
     """
     Set resourceStatus=approved on the project and all Dataset entities.
+    Also ensures Dataset entities carry the portal-facing annotations
+    (studyId, title, creator) required for display in the Dataset Collection.
     Files do not carry resourceStatus — it is a project-level annotation only.
     """
     updated = {"project": 0, "datasets": 0, "errors": 0}
+
+    study_name  = metadata.get("study_name", "")
+    study_leads = metadata.get("study_leads", [])
 
     # Project
     try:
@@ -158,7 +163,14 @@ def step1_update_resource_status(syn, project_id):
     datasets = get_children_rest(syn, project_id, types=["dataset"])
     for ds in datasets:
         try:
-            update_resource_status(syn, ds["id"])
+            raw = syn.restGET(f"/entity/{ds['id']}/annotations2")
+            ann = raw.get("annotations", {})
+            ann["resourceStatus"] = {"type": "STRING", "value": ["approved"]}
+            ann["studyId"]  = {"type": "STRING", "value": [project_id]}
+            ann["title"]    = {"type": "STRING", "value": [study_name]}
+            ann["creator"]  = {"type": "STRING", "value": study_leads}
+            raw["annotations"] = ann
+            syn.restPUT(f"/entity/{ds['id']}/annotations2", json.dumps(raw))
             updated["datasets"] += 1
         except Exception as e:
             print(f"  WARN: dataset {ds['id']}: {e}", file=sys.stderr)
@@ -653,7 +665,7 @@ def main():
     # Step 1 — Update resourceStatus on project, datasets, files
     print("\nStep 1: Updating resourceStatus → approved...")
     try:
-        stats = step1_update_resource_status(syn_portal, project_id)
+        stats = step1_update_resource_status(syn_portal, project_id, metadata)
         print(f"  Done: project={stats['project']}, datasets={stats['datasets']}, "
               f"errors={stats['errors']}")
     except Exception as e:
