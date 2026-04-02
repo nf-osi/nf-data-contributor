@@ -29,6 +29,7 @@ assignees: ""
 - [ ] Assay type(s) are correct
 - [ ] File annotations look reasonable
 - [ ] Wiki summary is informative
+- [ ] No sensitive or controlled-access data exposed unintentionally
 
 ---
 

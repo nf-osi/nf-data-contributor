@@ -158,7 +158,6 @@ def build_issue_body(
         "- [ ] Assay type(s) are correct",
         "- [ ] File annotations look reasonable (spot-check a few files)",
         "- [ ] Wiki summary is informative",
-        "- [ ] `resourceStatus` should be set to `approved` after review",
         "- [ ] No sensitive or controlled-access data exposed unintentionally",
         "\n---\n",
         "## Actions\n",
