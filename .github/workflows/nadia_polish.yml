@@ -1,0 +1,95 @@
+name: NADIA Polish — Deep Curation Run
+
+# Thorough one-project-at-a-time curation pass.
+# For each project: reads the paper, fetches source repository metadata,
+# reasons about every annotation field, validates against schema enums,
+# applies comprehensive annotations, and posts a detailed comment on the
+# study-review issue. Depth over breadth — fewer projects done well.
+#
+# Trigger manually, or schedule for overnight runs.
+
+on:
+  workflow_dispatch:
+    inputs:
+      project_limit:
+        description: 'Max projects to attempt (0 = no limit, agent decides based on turns)'
+        required: false
+        default: '0'
+      max_turns:
+        description: 'Maximum agent turns (default 80)'
+        required: false
+        default: '80'
+      starting_project:
+        description: 'Optional: start from a specific syn project ID (skips earlier ones)'
+        required: false
+        default: ''
+
+jobs:
+  polish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360   # 6 hours — thorough curation takes time
+
+    permissions:
+      issues: write
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js (for Claude Code CLI)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: lib/requirements.txt
+
+      - name: Install Python dependencies
+        run: pip install -r lib/requirements.txt
+
+      - name: Install Claude Code CLI
+        run: |
+          npm install -g @anthropic-ai/claude-code
+          echo "$(npm root -g)/../bin" >> "$GITHUB_PATH"
+
+      - name: Build project queue and write prompt
+        run: python3 scripts/nadia_polish_prep.py
+        env:
+          SYNAPSE_AUTH_TOKEN: ${{ secrets.SYNAPSE_AUTH_TOKEN }}
+          STATE_PROJECT_ID: ${{ vars.STATE_PROJECT_ID }}
+          AGENT_REPO_ROOT: ${{ github.workspace }}
+          NADIA_WORKSPACE_DIR: /tmp/nf_agent
+          PROJECT_LIMIT: ${{ github.event.inputs.project_limit || '0' }}
+          STARTING_PROJECT: ${{ github.event.inputs.starting_project || '' }}
+
+      - name: Run NADIA Polish
+        run: |
+          claude \
+            --permission-mode bypassPermissions \
+            --output-format stream-json \
+            --verbose \
+            --max-turns ${{ github.event.inputs.max_turns || '80' }} \
+            --add-dir "${{ github.workspace }}" \
+            -p "$(cat /tmp/nf_agent/nadia_polish_prompt.md)"
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SYNAPSE_AUTH_TOKEN: ${{ secrets.SYNAPSE_AUTH_TOKEN }}
+          NCBI_API_KEY: ${{ secrets.NCBI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          STATE_PROJECT_ID: ${{ vars.STATE_PROJECT_ID }}
+          AGENT_REPO_ROOT: ${{ github.workspace }}
+          NADIA_WORKSPACE_DIR: /tmp/nf_agent
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nadia-polish-${{ github.run_id }}
+          path: /tmp/nf_agent/
+          retention-days: 30
