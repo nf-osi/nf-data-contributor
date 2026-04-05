@@ -220,7 +220,7 @@ The audit script (code in `prompts/synapse_workflow.md`):
 
 **Read `prompts/annotation_gap_fill.md` for the complete source-exhaustion algorithm.** This phase runs the full gap-fill strategy against every remaining missing field, working through all available upstream sources before declaring a field unresolvable.
 
-After running `audit.py`, read `{WORKSPACE_DIR}/audit_results.json`. For each project with `reasoning_gaps`:
+After running `audit.py`, read `{WORKSPACE_DIR}/audit_results.json`. For **every** project (not just those with reasoning gaps), write an entry in `audit_reasoning_fixes.json`. Projects with no annotation gaps still need `dataset_ids_to_snapshot` populated so Phase 3 can mint stable versions.
 
 1. Read the available context: abstract (stored in audit_results), project annotations, wiki. Fetch the abstract from PubMed if missing.
 
@@ -250,7 +250,25 @@ After running `audit.py`, read `{WORKSPACE_DIR}/audit_results.json`. For each pr
 
 6. For any field where no valid enum value exists: use the closest available enum value and record the gap explicitly.
 
+   - `modelSystemName` missing for model-organism files → fetch strain/line from GEO GSM characteristics or SRA BioSample attributes
+   - `assayTarget` missing for ChIP-seq/CUT&RUN/ATAC-seq files → fetch antibody target from GEO protocol or SRA library fields
+   - `dataset_name` flagged as non-human-readable → rename dataset using `{assay} — {context} ({repo} {accession})` format
+
 7. Write `{WORKSPACE_DIR}/audit_reasoning_fixes.json` with all resolved values. Include a `gap_fill_report` per project (format defined in `prompts/annotation_gap_fill.md`) listing: which fields were filled at each tier, which values were found but failed enum validation (include the raw value), and which fields remain unfilled with the reason. This becomes the GitHub curation comment.
+
+**CRITICAL — `dataset_ids_to_snapshot` is required for every project:** Every entry in `audit_reasoning_fixes.json` must include `dataset_ids_to_snapshot`, a list of all `{"dataset_id": "synXXX"}` objects from that project. Phase 3 only mints stable Dataset versions for entries listed here. If this list is omitted or empty, no version is ever minted. For projects with no annotation gaps, write a minimal entry with just the project_id and dataset_ids_to_snapshot:
+
+```json
+{
+  "project_id": "syn74287500",
+  "project_annotation_fixes": {},
+  "file_annotation_fixes": [],
+  "dataset_ids_to_snapshot": [
+    {"dataset_id": "syn74287503"},
+    {"dataset_id": "syn74287510"}
+  ]
+}
+```
 
 ### 7c — Write and run `{WORKSPACE_DIR}/apply_audit_fixes.py` (Phase 3)
 
