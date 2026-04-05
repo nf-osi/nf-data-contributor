@@ -472,8 +472,9 @@ def classify_publication_group(group, portal_studies_df, agent_state_set):
 Score at the **publication group level** using the publication title + abstract. **Do this as direct reasoning — no Python API calls.** Read the metadata, reason about it, write the result to JSON.
 
 For each publication group, assess:
-- Is this about NF1, NF2, schwannomatosis, MPNST, or a related condition?
-- Is it primary experimental data (not a review or meta-analysis)?
+- Does this study fall within the disease or topic domain defined in `config/keywords.yaml`?
+- Is it primary experimental data (not a review, commentary, or meta-analysis)?
+- Does the linked accession actually belong to this paper (not a false elink hit)?
 - What assay type(s), species, tissue types?
 
 ```python
@@ -532,63 +533,149 @@ Each repository accession → one Dataset entity (direct child of project) + one
 
 ## Required Annotations
 
+The specific annotation field names required for your portal are defined in `config/settings.yaml` → `curation_checklist`. Read those lists at runtime — do not hardcode them. The guidance below describes the *categories* of information that must be annotated and how to populate them correctly.
+
 ### Project-Level (via `/entity/{project_id}/annotations2`)
 
-| Key | Value | Notes |
-|-----|-------|-------|
-| `studyName` | full publication title | |
-| `studyStatus` | `Completed` | Published studies are complete — NOT "Active" |
-| `dataStatus` | `Available` | |
-| `diseaseFocus` | list | use values from `config/settings.yaml` → `annotations.disease_focus_values` |
-| `manifestation` | list | **Required.** use values from `config/settings.yaml` → `annotations.manifestation_values` |
-| `dataType` | list | `geneExpression`, `genomicVariants`, `proteomics`, `drugScreen`, `immunoassay`, `image`, `surveyData`, `clinicalData`, `other` |
-| `studyLeads` | list | **Required.** First + last/corresponding author |
-| `institutions` | list | from author affiliations |
-| `fundingAgency` | list | from PubMed GrantList; fallback `Not Applicable (External Study)` |
-| `resourceStatus` | `pendingReview` | |
-| `alternateDataRepository` | list | `{prefix}:{accession}` strings — see below |
-| `pmid` | string | if available |
-| `doi` | string | if available |
+Read `curation_checklist.required_project_annotations` from config for the full field list. In every deployment, the project must capture:
 
-### File-Level (each individual File entity — applies to portal files table)
+| Category | How to populate | Notes |
+|----------|----------------|-------|
+| Study name / title | Full publication title | |
+| Study completion status | `Completed` for published studies | Never "Active" for deposited public data |
+| Data availability status | e.g. `Available` | |
+| Disease/topic focus | From `annotations.disease_focus_values` in config | Use controlled vocabulary only |
+| Disease manifestation/subtype | From `annotations.manifestation_values` in config | Use controlled vocabulary only |
+| Assay / data type category | Controlled vocabulary from schema | List; may cover multiple assay types |
+| Study leads / investigators | **From PubMed AuthorList** — first + last/corresponding author | NOT the repository submitter |
+| Author institutions | From PubMed author affiliations | Truncate to fit annotation length limits |
+| Funding agency | From PubMed GrantList; fallback to a "not applicable" placeholder | |
+| Resource / review status | `pendingReview` | Do NOT set `approved` — that's a human action |
+| External accessions | All related repository accessions as `prefix:accession` list | See `alternateDataRepository` prefixes section |
+| PMID | PubMed ID if available | |
+| DOI | DOI if available | |
 
-| Key | Required | Notes |
-|-----|----------|-------|
-| `study` | Yes | |
-| `assay` | Yes | must match schema enum |
-| `species` | Yes | must match schema enum |
-| `tumorType` | **Yes** | **never omit** — derive from paper |
-| `diagnosis` | Yes | must match schema enum |
-| `fileFormat` | **Yes** | strip compression suffixes (`.gz`→ bare ext); match schema enum |
-| `resourceType` | Yes | `experimentalData` for data files |
-| `externalAccessionID` | Yes | |
-| `externalRepository` | Yes | |
-| `specimenID` | **Yes** | **one per file** — parse from filename prefix, never a list |
-| `individualID` | **Yes** | **one per file** |
-| `dataSubtype` | Yes | `raw` / `processed` / `normalized` |
-| `platform` | Yes | must match schema enum |
-| `libraryPreparationMethod` | Yes | must match schema enum |
-| `modelSystemName` | Yes (model organism studies) | strain/line name e.g. `"C57BL/6"` — fetch from sample characteristics |
-| `assayTarget` | Yes (ChIP-seq/CUT&RUN/ATAC-seq) | antibody target e.g. `H3K27ac` — fetch from GEO protocol or ENA library fields |
+### File-Level (each individual File entity)
 
-> **NEVER set on File entities:**
-> - `resourceStatus` — belongs only on the **Project** and **Dataset entity**. Setting it on files creates a spurious column in the Datasets tab that data managers must manually remove.
-> - `filename` — do NOT add as a custom annotation. The Synapse system `name` property IS the filename column in Dataset views.
+**The bound JSON schema is the authoritative source for what file annotation fields exist.** Call `fetch_schema_properties(schema_uri)` after selecting the schema template, then populate every field the source metadata supports. Do not maintain or consult a separate field list — if it isn't in the schema, don't set it; if it is, try to populate it.
 
-**Only set enum values that exist in the schema** — fetch at runtime from `https://repo-prod.prod.sagebase.org/repo/v1/schema/type/registered/{schema_uri}`.
+The schema tells you:
+- Which fields exist and what their names are
+- Which fields have controlled vocabularies (enums) — only set valid enum values
+- Which fields apply to specific assay types or study conditions (check all schema properties, not just a subset)
 
-### Dataset Folder Level
+When populating schema fields, the Annotation Quality Standards apply (see section below). In particular:
+- Organism/taxon fields: read from repository source, never infer
+- Instrument/technology fields: use the exact model name from source, not a vendor category
+- Assay-type fields: verify from repository library metadata, not publication title
+- Per-sample identifier fields: one unique value per file, parsed from run accession
+- File format/extension fields: strip compression suffixes before storing (e.g. `fastq.gz` → `fastq`)
 
-| Key | Value |
-|-----|-------|
-| `contentType` | `dataset` |
-| `externalAccessionID` | {accession_id} |
-| `externalRepository` | {source_repository} |
-| `resourceStatus` | `pendingReview` |
-| `study` | {project_name} |
-| `studyId` | {synapse_project_id} |
-| `title` | {publication_title} |
-| `creator` | list of study leads (first + last/corresponding author) |
+> **NEVER set on File entities — regardless of what the schema says:**
+> - The resource/review status field — belongs only on the **Project** and **Dataset entity**. Setting it on files creates a spurious column in the Datasets tab.
+> - A custom filename annotation — the Synapse system `name` property is the filename column in Dataset views. Adding it as a custom annotation creates a duplicate column.
+
+---
+
+## Annotation Quality Standards
+
+These rules apply to every project, regardless of domain. They describe *principles* — the specific field names they apply to vary by schema and must be discovered at runtime via `fetch_schema_properties(schema_uri)`.
+
+### 1 — Schema enums are ground truth. Fetch them first.
+
+Before writing any annotation, call `fetch_schema_properties(schema_uri)` to retrieve every field the schema defines, along with its enum constraints. Never use hardcoded field names or assume enum values from memory. If a source value is not in the enum, do not invent a mapping — use the closest valid enum value and flag it for human review in the GitHub curation comment.
+
+### 2 — Instrument/technology fields: use exact values from the source repository
+
+When a schema defines a field for the instrument, platform, or sequencing technology used, that field must contain the exact model name from the source repository — not a generic vendor or category name (e.g., "Illumina HiSeq 2500" not "Illumina"). The source of truth is:
+- ENA/SRA filereport: `instrument_model` column
+- GEO SOFT: `!Series_instrument_model` or `!Sample_instrument_model`
+- PRIDE or other proteomics repos: instrument field in project metadata
+
+Identify which schema field captures this concept by calling `fetch_schema_properties()` and looking for fields named platform, instrument, technology, or similar.
+
+### 3 — Investigator fields: use paper authors, not repository submitters
+
+Repository submitter fields (ENA, ArrayExpress, PRIDE, etc.) reflect whoever deposited the files — often a research engineer or postdoc — not the principal investigator or corresponding author. When a schema has a field for study investigators, study leads, or principal investigators, derive it from the PubMed AuthorList (first + last/corresponding author), not the repository submitter. If no PMID is available, check BioStudies for an explicit `principal investigator` role. Only fall back to the repository submitter if no other source exists, and flag it for human review.
+
+### 4 — Organism/species fields: always read from source metadata, never infer
+
+Any disease can appear across multiple species (human patient samples, mouse models, zebrafish, Drosophila, cell lines, etc.). When a schema defines an organism or taxon field, always read it from the repository's organism/taxon attribute — not from the disease context, model name, or study description. GEO `!Series_sample_taxid`, ENA `scientific_name`, and BioStudies `Organism` are authoritative. If the repository lists multiple species (e.g., human xenograft in mouse), include all distinct values.
+
+### 5 — Sample-varying fields: populate per-file from sample-level metadata, not study-level
+
+Many schema fields vary between samples within a single study — not just identifier fields, but also biological and technical attributes like genotype, experimental condition, sex, age, tissue, cell type, preparation method, and any treatment or perturbation fields. Setting a single study-level value for all files is wrong whenever the study contains multiple sample groups.
+
+For every file:
+1. Map the file back to its source sample/run accession (SRR → SRX → GSM, or BioSample ID from ENA filereport)
+2. Fetch that sample's individual metadata record (GEO GSM characteristics, SRA BioSample attributes, ENA sample record)
+3. Populate each schema field from that sample's specific values, not from the study-level summary
+
+For identifier fields (specimen ID, sample ID, individual ID, biobank ID, or similar): the value must be unique per file — not a single shared value copied to all files. Parse from filename prefixes (run accessions like SRR, ERR, GSM are reliable) or from the SRA run table / GEO GSM list.
+
+**Signal that this rule was violated:** all files in the project have the same value for a field that represents a biological property of a sample (genotype, condition, sex, etc.) despite the study having multiple experimental groups.
+
+### 6 — Assay subtype fields: verify from source metadata, not title
+
+Publication titles often describe the biology, not the technology. When a schema has an assay-type field with fine-grained values (e.g., distinguishing single-cell from bulk RNA-seq, or ChIP-seq target type), the source of truth is the repository's library metadata — not the paper title. Check ENA `library_source`/`library_strategy`, GEO sample characteristics, or repository experiment descriptions before setting these fields.
+
+### 7 — Verify the paper actually generated the data
+
+NCBI elink and Europe PMC annotations can return accessions from different papers than the one being processed. Before using a linked accession, verify ownership:
+- GEO: `Entrez.esummary(db='gds', id=...)` → check `PubMedIds` matches the PMID
+- SRA/ENA: filereport `study_title` should match the paper
+- For repository-direct candidates: check the repository record's abstract matches the paper being processed
+
+If the data belongs to a different paper, discard it and process it separately under that paper's PMID.
+
+### 8 — Cross-repository linking: add all related accessions
+
+A single study often deposits data in multiple repositories (GEO + SRA + BioProject, or PRIDE + MassIVE). Always populate `alternateDataRepository` with all related accessions, not just the one you discovered it through. For GEO series, check `!Series_relation` for linked SRA/BioProject accessions. For ENA studies, check the study record for linked accessions.
+
+### 9 — Controlled vocabulary gaps: flag, don't silently drop
+
+When a concept from the study is not in the schema enum (e.g., a tumor type or species not yet in the controlled vocabulary), use the closest available enum value AND explicitly document the gap in the GitHub curation comment. This ensures human reviewers know what was approximated and can request a vocabulary update if warranted. Do not silently omit required fields — a best-effort value with a flag is better than a missing field.
+
+### 10 — Post-curation GitHub comment is required
+
+After completing annotations for each project, post a GitHub comment on the study-review issue documenting:
+- Which fields were set and what values were chosen
+- Which values were derived by reasoning vs. directly from source
+- Any controlled vocabulary gaps or approximations made
+- Any fields that could not be populated and why
+- Items that require human review (ambiguous data, missing info, species mismatch, etc.)
+
+This comment is the handoff from autonomous annotation to human review. Without it, data managers cannot evaluate the quality of the curation or identify what needs correction.
+
+### 11 — Schema completeness check: compare every schema property against what was set
+
+After annotating files, run an explicit completeness check against the bound schema before considering annotation done:
+
+1. Call `fetch_schema_properties(schema_uri)` to get every property the schema defines
+2. For each file, compare its current annotations against that full property list
+3. For each missing property, attempt to fill it from the file's per-sample source metadata (see Standard 5):
+   - Fetch the sample record for this specific file's run/sample accession
+   - Check whether the missing field has a value in that sample's attributes
+   - Apply only valid enum values; flag anything not in the enum per Standard 9
+4. For fields that genuinely cannot be determined from any available source, explicitly document them as unresolvable in the GitHub curation comment — do not silently leave them blank
+
+This check must happen before the Dataset entity `items` are finalized, so that annotation completeness is reflected in the Dataset view from the start. The check also catches the case where the same incorrect study-level value was copied to all files for a field that should vary per sample (Standard 5 violation).
+
+---
+
+### Dataset Entity Level
+
+Read `curation_checklist.required_dataset_annotations` from config for the full field list. In every deployment, the Dataset entity captures the information needed to link it back to its project and source:
+
+| Category | Value |
+|----------|-------|
+| Content type marker | e.g. `dataset` |
+| External accession ID | Repository accession for this dataset |
+| External repository | Source repository name |
+| Resource / review status | `pendingReview` |
+| Study / project link | Project name and Synapse project ID |
+| Publication title | Full title of the publication |
+| Study leads | List of investigators (first + corresponding author) |
 
 ---
 
@@ -753,12 +840,12 @@ For repository-direct candidates (Zenodo, Figshare, OSF, etc.) found without a P
 2. If DOI but no PMID: search PubMed with `"{doi}"[doi]`
 3. If neither: search PubMed by title (first 8 words as `[tiab]`)
 4. If PMID found: use paper title as project name, group all datasets from the same paper into one project
-5. If no publication found: **search bioRxiv** using key terms from the accession (mouse model name, assay method, PI institution, NF type). ENA/ArrayExpress datasets without a PMID frequently have an associated preprint posted after data submission. If a preprint is found, use it for studyLeads, doi, and wiki.
+5. If no publication found: **search bioRxiv** using key terms from the accession (mouse model name, assay method, PI institution, disease type from `config/keywords.yaml`). ENA/ArrayExpress datasets without a PMID frequently have an associated preprint posted after data submission. If a preprint is found, use it for studyLeads, doi, and wiki.
 6. If still no publication/preprint: use repository record title, note as possible preprint
 
-### Deriving `studyLeads`
+### Deriving the study investigator / PI field
 
-**Critical: the ENA/ArrayExpress submitter is NOT the PI.** Submitters are often research engineers or postdocs who performed the experiment. The `studyLeads` field should contain the first and last/corresponding author, not the submitter.
+**Critical: the ENA/ArrayExpress submitter is NOT the PI.** Submitters are often research engineers or postdocs who performed the experiment. The investigator field (check `curation_checklist.required_project_annotations` in config for its name) should contain the first and last/corresponding author, not the repository submitter.
 
 Priority order:
 1. **PMID available** → PubMed AuthorList: first author + last/corresponding author
@@ -767,7 +854,7 @@ Priority order:
 
 ### Verifying `species`
 
-**Always verify species from the repository's taxon/organism field.** Never infer species from the disease context or mouse model name. GEO SOFT `!Series_sample_taxid`, ENA `scientific_name`, and BioStudies `Organism` attribute are authoritative. A dataset about NF1 can use human, mouse, Drosophila, or zebrafish — do not assume.
+**Always verify species from the repository's taxon/organism field.** Never infer species from the disease context, mouse model name, or study description. GEO SOFT `!Series_sample_taxid`, ENA `scientific_name`, and BioStudies `Organism` attribute are authoritative. Any disease study may use human, mouse, rat, Drosophila, zebrafish, or other model organisms — do not assume.
 
 ### Assay specificity: `RNA-seq` vs `single-cell RNA-seq`
 
@@ -787,28 +874,38 @@ When source metadata contains ANY of:
 
 Before logging `synapse_created` or `dataset_added`, verify:
 
+> **Field names are community-specific.** The specific annotation keys to check are defined in `config/settings.yaml` → `curation_checklist`. Read that section at runtime to get the required field lists for your portal — do not rely on hardcoded names here.
+
 ### Project level
-- [ ] Annotations: `studyName`, `studyStatus` (= `Completed`), `dataStatus`, `diseaseFocus`, `manifestation`, `dataType`, `studyLeads`, `institutions`, `fundingAgency`, `resourceStatus` (= `pendingReview`), `alternateDataRepository`, `pmid`, `doi`
+- [ ] All fields in `curation_checklist.required_project_annotations` are set on the project entity
+  - The field for study completion status = `Completed` (published studies are complete, never "Active")
+  - The field for resource/review status = `pendingReview`
+  - Investigator/author field derived from PubMed AuthorList, not repository submitter
+  - Funder field from PubMed GrantList; fallback to a "not applicable" placeholder value
+- [ ] `pmid` and `doi` set if available (these are standard regardless of schema)
 - [ ] Data manager team (`synapse.team_id` from config) has administrator permissions
 - [ ] Wiki created with title, abstract, datasets table, and plain-language summary
 
 ### Per dataset (repeat for each accession)
 - [ ] `Raw Data/{Repo}_{AccessionID}_files/` folder exists with File entities
-- [ ] Each File entity has: `study`, `assay`, `species`, `tumorType`, `diagnosis`, `fileFormat`, `resourceType`, `externalAccessionID`, `externalRepository`, `specimenID` (one per file), `individualID` (one per file)
-- [ ] **No File entity has `resourceStatus`** — it must NOT be set on files (only on Project + Dataset entity)
-- [ ] **No File entity has a custom `filename` annotation** — use the Synapse system `name` column instead
-- [ ] `fileFormat` strips compression suffixes (`fastq.gz` → `fastq`, `txt.gz` → `txt`)
-- [ ] `tumorType` set on every file
-- [ ] `specimenID` is per-file, not a multi-value list
-- [ ] For model organism studies: `modelSystemName`, `modelSpecies`, `modelSex` set on all files
-- [ ] For ChIP-seq/CUT&RUN/ATAC-seq: `assayTarget` set on all files
-- [ ] No file has `needsExtraction` as its only/final annotation
-- [ ] Dataset entity (`org.sagebionetworks.repo.model.table.Dataset`) is a **direct child of the project**
-- [ ] Dataset entity name is human-readable: format `{assay} — {context} ({repo} {accession})`
-- [ ] Dataset entity `items` field populated with all File entity IDs
-- [ ] Dataset entity has `columnIds` set (expanded 23-column set including `assayTarget`)
-- [ ] Dataset entity annotated: `contentType`, `externalAccessionID`, `externalRepository`, `resourceStatus`, `study`
+- [ ] **Schema completeness check run** (Standard 11): called `fetch_schema_properties(schema_uri)`, compared every property against what was set on each file, and attempted to fill all missing properties from per-sample source metadata before finalizing
+- [ ] **No schema property left blank without documented reason**: every missing field is either (a) not applicable and noted in the GitHub comment, or (b) genuinely unavailable from any source and flagged for human review
+- [ ] **No sample-varying field has the same value on all files** unless the study genuinely has only one sample group — if a field like genotype, condition, sex, age, tissue, or cell type is uniform across all files in a multi-group study, that is a signal it was set at study level rather than per-sample (Standard 5 violation)
+- [ ] **No File entity has a resource/review status annotation** — that field belongs only on Project and Dataset entities; setting it on files creates an unwanted column in the portal view
+- [ ] **No File entity has a custom filename annotation** — the Synapse system `name` property is the filename column in Dataset views; adding it as a custom annotation creates a duplicate column
+- [ ] Any file-format/extension field strips compression suffixes before storing (e.g. `fastq.gz` → `fastq`, `txt.gz` → `txt`)
+- [ ] Per-sample identifier fields contain a unique value per file — not a shared value copied to all files
+- [ ] No file has a zip-extraction flag as its only/final annotation
+- [ ] Dataset entity (`org.sagebionetworks.repo.model.table.Dataset`) is a **direct child of the project** (not inside Raw Data or any subfolder)
+- [ ] Dataset entity name is specific and informative — see naming guidance in `prompts/synapse_workflow.md`
+- [ ] Dataset entity `items` populated with all File entity IDs
+- [ ] Dataset entity `columnIds` set from `curation_checklist.dataset_column_fields` in config (read at runtime — do not hardcode a column count)
+- [ ] All fields in `curation_checklist.required_dataset_annotations` set on the Dataset entity
 - [ ] Stable version minted on Dataset entity via `POST /entity/{id}/version`
-- [ ] NF schema bound to the **files folder** via `bind_json_schema(schema_uri, files_folder_id)`
-- [ ] Schema binding verified via `js.validate(files_folder_id)`
-- [ ] No empty folders exist in the project (no `Analysis/` or other placeholder folders)
+- [ ] Metadata schema bound to the **files folder** (not the Dataset entity, not the project) via `bind_json_schema(schema_uri, files_folder_id)`
+- [ ] Schema binding verified
+- [ ] No empty folders exist in the project
+
+### Post-curation
+- [ ] GitHub study-review issue exists (created by `scripts/github_issue.py`)
+- [ ] Curation comment posted on the issue documenting: annotation values chosen, sources consulted, controlled vocabulary gaps, items for human review

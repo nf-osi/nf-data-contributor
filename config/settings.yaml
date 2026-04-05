@@ -79,6 +79,65 @@ annotations:
     - "Memory"
     - "Pain"
 
+curation_checklist:
+  # Fields that must be set on the Synapse Project entity.
+  # These are the annotation keys your portal's studies table expects.
+  # Replace with the field names from your portal's metadata dictionary.
+  required_project_annotations:
+    - studyName           # expected: full publication title
+    - studyStatus         # expected: Completed (for published studies)
+    - dataStatus          # expected: Available
+    - diseaseFocus        # controlled vocabulary — see annotations.disease_focus_values
+    - manifestation       # controlled vocabulary — see annotations.manifestation_values
+    - dataType            # controlled vocabulary — assay category
+    - studyLeads          # first + last/corresponding author (from PubMed, not repository submitter)
+    - institutions        # author affiliations (max 500 chars total)
+    - fundingAgency       # from PubMed GrantList; fallback: "Not Applicable (External Study)"
+    - resourceStatus      # expected: pendingReview
+    - alternateDataRepository  # list of prefix:accession strings
+
+  # NOTE: File-level annotation fields are NOT listed here — they are determined at runtime
+  # by calling fetch_schema_properties(schema_uri) on the bound JSON schema.
+  # The schema is the authoritative source for what fields exist on File entities,
+  # what values are valid, and which fields apply conditionally (e.g. model organism fields,
+  # antibody assay fields). Do not maintain a parallel field list here.
+
+  # Fields that must be set as annotations on each Dataset entity.
+  required_dataset_annotations:
+    - contentType         # expected: dataset
+    - externalAccessionID
+    - externalRepository
+    - resourceStatus      # expected: pendingReview
+    - study               # project name
+    - studyId             # Synapse project ID
+
+  # Schema properties to include as columns in each Dataset entity's columnIds list.
+  # This drives what columns appear in the Datasets tab for this portal.
+  # Add or remove fields to match the schema properties your portal uses.
+  dataset_column_fields:
+    - study
+    - assay
+    - species
+    - tumorType
+    - diagnosis
+    - fileFormat
+    - resourceType
+    - externalAccessionID
+    - externalRepository
+    - specimenID
+    - individualID
+    - dataSubtype
+    - platform
+    - libraryPreparationMethod
+    - studyId
+    - dataType
+    - modelSystemName
+    - assayTarget
+    - sex
+    - age
+    - ageUnit
+    - organ
+
 notifications:
   github:
     enabled: true

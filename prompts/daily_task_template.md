@@ -216,18 +216,29 @@ After running `audit.py`, read `{WORKSPACE_DIR}/audit_results.json`. For each pr
 
 1. Read the available context: abstract (stored in audit_results), project annotations, wiki
 2. If PMID is known and abstract is missing, fetch it from PubMed
-3. Reason through each gap:
-   - `diseaseFocus`, `manifestation` → infer from disease mentions in title + abstract
-   - `dataType` → infer from assay type
-   - `studyLeads` → fetch first + last author from PubMed AuthorList if PMID available; otherwise infer from abstract
-   - `institutions` → from author affiliations in PubMed record or abstract
-   - `alternateDataRepository` → reconstruct from accession_id + REPO_TO_PREFIX
-   - `assay`, `species`, `tumorType`, `diagnosis` → infer from abstract + experimental description
-   - `platform` → fetch from repository (GEO series platform field, SRA instrument_model in runinfo)
-   - `libraryPreparationMethod` → look for kit/method names in abstract ("10x Chromium", "Smart-seq2", "polyA")
-   - `specimenID` where auto-parse failed → look at repository sample metadata (GEO GSM table, SRA BioSample)
+3. **Schema completeness check (Standard 11)** — For each project, call `fetch_schema_properties(schema_uri)` on the bound schema (read the URI from `audit_results.json` → `schema_uri`, or re-fetch from `/entity/{files_folder_id}/schema/binding`). Compare every schema property against the annotations currently on each file. Build a list of missing properties per file.
+
+4. **Sample-varying field check (Standard 5)** — For each schema field in the missing list (and for any field that has the same value on all files), check whether the study has multiple experimental groups or sample types. If it does:
+   - Map each file to its source sample by fetching the repository run table (SRA runinfo, ENA filereport, GEO GSM table)
+   - For each distinct sample, fetch its individual metadata record (GEO GSM characteristics, SRA BioSample attributes, ENA sample)
+   - Re-populate any field that varies per sample with the per-sample value
+   - Do NOT carry over study-level values for fields that should vary (genotype, condition, sex, age, tissue, cell type, treatment, etc.)
+
+5. Reason through remaining gaps using the Annotation Quality Standards from CLAUDE.md:
+   - Disease/topic focus fields → infer from disease mentions in title + abstract
+   - Data type category field → infer from assay type
+   - Investigator/study lead fields → **always fetch from PubMed AuthorList** (first + last/corresponding author); do NOT use ENA/repository submitter fields — submitters are often research engineers, not PIs
+   - Institution/affiliation fields → from author affiliations in PubMed record or abstract
+   - External accession list → reconstruct from accession_id + REPO_TO_PREFIX; check GEO `!Series_relation` for linked SRA/BioProject accessions and include them all
+   - Assay-type fields → verify from repository library metadata (ENA `library_source`/`library_strategy`, GEO sample characteristics) before setting; do not infer from publication title
+   - Organism/taxon fields → **always verify from repository organism/taxon field** (ENA `scientific_name`, GEO `!Series_sample_taxid`); never infer from disease context
+   - Biological/tissue/phenotype fields → infer from abstract + experimental description; use schema enum values only
+   - Instrument/technology fields → **fetch the exact model from repository source**: ENA `instrument_model` column, GEO `!Series_instrument_model` — do not use generic vendor names
+   - Library preparation/method fields → look for kit/method names in abstract, GEO protocol fields, ENA `library_selection`
+   - Library type fields (strand, run type, nucleic acid source) → ENA `library_layout`, `library_source`, `library_strand`; these are in the ENA filereport and should be considered mechanical fields
    - `wiki` missing → create from wiki template (in `prompts/synapse_workflow.md`) using available metadata
-4. Write `{WORKSPACE_DIR}/audit_reasoning_fixes.json` with all resolved values
+6. For any required field where no valid enum value exists: use the closest available enum value and record the gap
+7. Write `{WORKSPACE_DIR}/audit_reasoning_fixes.json` with all resolved values, including `curation_notes` per project listing approximations and items for human review. The `curation_notes` must include a `missing_schema_fields` section listing every property that could not be populated and why.
 
 ### 7c — Write and run `{WORKSPACE_DIR}/apply_audit_fixes.py` (Phase 3)
 
@@ -248,11 +259,24 @@ Warnings remaining: N
 ========================
 ```
 
+### 7d — Post curation comments on GitHub issues
+
+For each project that was created or updated in this run, post a comment on its GitHub study-review issue documenting what was done. The comment should include:
+- A summary of which annotation fields were set and the key values chosen
+- Which values were read directly from the source repository vs. reasoned from the abstract
+- Any controlled vocabulary gaps (value not in enum → closest enum used + explanation)
+- Any fields that could not be populated and why
+- Items that require human review (ambiguous species, unverified study leads, missing tumor type, etc.)
+
+Use `scripts/github_issue.py`'s `post_issue_comment()` function. This is not optional — the comment is the primary handoff to human reviewers.
+
 ---
 
-## Step 8 — JIRA Notifications
+## Step 8 — GitHub Issue Notifications
 
-Write and run `{WORKSPACE_DIR}/notify.py`. Attempt ticket creation; log 401/placeholder errors as warnings and continue.
+For each project created or updated in Step 6, a study-review GitHub issue must exist. Use `scripts/github_issue.py` (see CLAUDE.md for the calling pattern). Log all issue URLs before exit.
+
+If running in GitHub Actions, `GITHUB_TOKEN` and `GITHUB_REPOSITORY` are set automatically. On errors, log a warning and continue — do not abort the run.
 
 ---
 

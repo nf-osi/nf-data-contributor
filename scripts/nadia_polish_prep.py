@@ -152,7 +152,7 @@ children = list(syn.getChildren(project_id))
 Fetch:
 - Current project-level annotations
 - All child entities (Datasets, Raw Data folder, Source Metadata folder)
-- For each `{Repo}_{Accession}_files/` folder: list all File entities and their current annotations
+- For each `{{Repo}}_{{Accession}}_files/` folder: list all File entities and their current annotations
 
 ### Step 2 — Read the publication
 
@@ -177,10 +177,10 @@ For every accession in the project, pull the repository's own metadata:
 ```python
 # Fetch GEO SOFT miniml for series-level metadata
 import httpx
-r = httpx.get(f'https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc={gse_id}&targ=self&form=text&view=quick', timeout=30)
+r = httpx.get(f'https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc={{gse_id}}&targ=self&form=text&view=quick', timeout=30)
 # Parse: !Series_platform_id, !Series_type, !Series_sample_taxid, !Series_overall_design
 # Then fetch a sample record for platform details:
-r2 = httpx.get(f'https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc={gsm_id}&targ=self&form=text&view=quick', timeout=30)
+r2 = httpx.get(f'https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc={{gsm_id}}&targ=self&form=text&view=quick', timeout=30)
 # Parse: !Sample_instrument_model, !Sample_library_strategy, !Sample_library_source,
 #        !Sample_source_name_ch1, !Sample_organism_ch1, !Sample_characteristics_ch1
 ```
@@ -233,18 +233,35 @@ r = httpx.get(
 )
 schema = r.json()
 
-# Extract enum values for each field by traversing properties
-def get_enum_values(schema, field_name):
-    props = schema.get('properties', {{}})
-    if field_name in props:
-        prop = props[field_name]
-        # Handle $ref
-        if '$ref' in prop:
-            ref = prop['$ref']
-            # fetch the referenced definition
-            pass
-        return prop.get('enum', prop.get('items', {{}}).get('enum', []))
-    return []
+# Fetch ALL schema properties and their enum constraints
+def fetch_schema_properties(schema_uri):
+    url = f'https://repo-prod.prod.sagebase.org/repo/v1/schema/type/registered/{{schema_uri}}'
+    schema = httpx.get(url, timeout=15).json()
+    props = {{}}
+    def collect(obj):
+        if not isinstance(obj, dict):
+            return
+        for name, defn in obj.get('properties', {{}}).items():
+            if not isinstance(defn, dict):
+                continue
+            entry = {{'type': defn.get('type', 'string'), 'description': defn.get('description', '')}}
+            if 'enum' in defn:
+                entry['enum'] = defn['enum']
+            else:
+                for sub_key in ('anyOf', 'oneOf'):
+                    for sub in defn.get(sub_key, []):
+                        if 'enum' in sub:
+                            entry['enum'] = sub['enum']
+            props[name] = entry
+        for defs_key in ('definitions', '$defs'):
+            for d in obj.get(defs_key, {{}}).values():
+                collect(d)
+    collect(schema)
+    return props
+
+schema_props = fetch_schema_properties(schema_uri)
+# Use schema_props[field]['enum'] to validate values before writing
+# e.g. valid_assays = schema_props.get('assay', {{}}).get('enum', [])
 ```
 
 **Never set a value that isn't in the enum.** If you can't find an exact match,
@@ -296,7 +313,11 @@ Work through **every field** in the tables below. For each one:
 
 **Also check:**
 - `resourceStatus` should NOT be set on File entities — remove it if present
+- `filename` should NOT be a custom annotation on File entities — remove it if present
 - Dataset entities should have `studyId`, `title`, `creator`, `contentType`, `resourceStatus` annotations
+- Dataset entity name must be descriptive: format `{{assay}} — {{cell/tissue type, condition}} ({{repo}} {{accession}})` — not just `GEO_GSE123456`
+- `fileFormat` must strip compression suffixes: `fastq.gz` → `fastq`, `txt.gz` → `txt`
+- `specimenID` and `individualID` must be unique per file — not the same value copied to all files
 
 ### Step 6 — Apply all annotations
 
@@ -349,7 +370,7 @@ anns = Annotations(entity=file_id, etag=current_etag, annotations={{
 syn.set_annotations(anns)
 ```
 
-### Step 7 — Rebind schema to correct template
+### Step 7 — Rebind schema and mint Dataset version
 
 After updating file annotations, rebind the files folder to the correct schema:
 ```python
@@ -372,6 +393,19 @@ syn._rest_post(f'/entity/{{files_folder_id}}/schema/binding',
                                   '$id': schema_uri}}}}))
 ```
 
+Then mint a stable version on each Dataset entity so data managers have a citable snapshot:
+```python
+# Mint a stable version on the Dataset entity — do this AFTER all annotations are final
+import json
+for dataset_id in dataset_ids:  # list of Dataset entity IDs for this project
+    try:
+        syn.restPOST(f'/entity/{{dataset_id}}/version',
+                     json.dumps({{'versionLabel': 'curation-pass', 'versionComment': 'NADIA curation pass'}}))
+        print(f"  Minted version on {{dataset_id}}")
+    except Exception as e:
+        print(f"  Warning: could not mint version on {{dataset_id}}: {{e}}")
+```
+
 ### Step 8 — Post a detailed comment on the GitHub issue
 
 After completing the project, post a comment on its study-review issue summarising
@@ -383,30 +417,37 @@ Format:
 ```
 ## Curation Pass Complete
 
-**Source:** [PubMed PMID:xxxxx](https://pubmed.ncbi.nlm.nih.gov/xxxxx/) |
-[GEO GSExxxxxx](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSExxxxxx)
+**Sources consulted:** [PubMed PMID:xxxxx](https://pubmed.ncbi.nlm.nih.gov/xxxxx/) |
+[GEO GSExxxxxx](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSExxxxxx) |
+[ENA SRPxxxxxx](https://www.ebi.ac.uk/ena/browser/view/SRPxxxxxx)
 
 ### Project-level annotations updated
-| Field | Previous | New |
-|-------|----------|-----|
-| studyLeads | Not Available | Smith J, Doe A |
-| institutions | (empty) | Indiana University, Johns Hopkins |
-| fundingAgency | (empty) | NCI NIH HHS, DoD |
-| manifestation | MPNST | MPNST, Plexiform Neurofibroma |
+| Field | Previous | New | Source |
+|-------|----------|-----|--------|
+| studyLeads | Not Available | Smith J, Doe A | PubMed AuthorList |
+| institutions | (empty) | Indiana University, Johns Hopkins | PubMed affiliations |
+| fundingAgency | (empty) | NCI NIH HHS, DoD | PubMed GrantList |
+| manifestation | MPNST | MPNST, Plexiform Neurofibroma | abstract reasoning |
 ...
 
 ### File-level annotations updated (N files)
-| Field | Value set | Source |
-|-------|-----------|--------|
-| platform | Illumina HiSeq 4000 | GEO GSM... instrument_model |
-| libraryPreparationMethod | polyA selection | GEO series overall_design |
-| tumorType | Malignant Peripheral Nerve Sheath Tumor | abstract + GSM source_name |
+| Field | Value set | Source | Reasoning or direct? |
+|-------|-----------|--------|----------------------|
+| platform | Illumina HiSeq 4000 | GEO !Sample_instrument_model | direct read |
+| libraryPreparationMethod | polyA selection | GEO !Series_library_selection | direct read |
+| tumorType | Malignant Peripheral Nerve Sheath Tumor | abstract + GSM source_name | reasoning |
+| assay | RNA-seq | ENA library_strategy=RNA-Seq | direct read |
 ...
 
 ### Schema
 Rebound files folder `syn...` from `processedgeneexpressiontemplate` → `rnaseqtemplate`
+Dataset version minted: `syn...` v2
 
-### Could not determine
+### Controlled vocabulary gaps
+- (field): source value "(raw value)" not in enum — used closest match "(chosen value)"
+- (or: No gaps — all values matched schema enums exactly)
+
+### Could not determine — needs human review
 - specimenID: filename prefixes are hash-like (e.g. `d7a3f9`) — cannot reliably parse
   without sample sheet. Data manager should verify.
 ```

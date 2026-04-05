@@ -46,27 +46,54 @@ for filename, download_url in file_list:
 ```python
 import json
 
-# Human-readable Dataset name — assay type + context + repository/accession
-# normalized_annotations['assay'] is already set from Step D
+# Human-readable Dataset name — assay + specific biological context + repository/accession
+# The name must be specific enough that a data manager can understand what the data is
+# without opening the record. Pull as many meaningful context signals as available.
+#
+# Schema field names below are illustrative — check schema_props for the actual names
+# in the bound schema (they may differ across dictionaries).
 assay_label = normalized_annotations.get('assay', 'Data')
 if isinstance(assay_label, list):
     assay_label = ', '.join(assay_label)
-species_label = normalized_annotations.get('species', '')
-if isinstance(species_label, list):
-    species_label = ', '.join(species_label)
 
-# Include disease/tissue context to make the name human-readable at a glance.
-# For ChIP-seq: append the assay target (e.g. "ChIP-seq H3K27ac")
-# Priority: assayTarget > tumorType > organ > disease_focus (first value)
+# Build a rich biological context string.
+# Priority for context signals (use ALL that are available and add up to a useful description):
+#   1. Assay target/antibody (for antibody-based assays: ChIP-seq, CUT&RUN, etc.)
+#   2. Cell type or tissue type (most specific available)
+#   3. Tumor type, diagnosis, or disease
+#   4. Organism / model system (if non-obvious or if multiple species)
+#   5. Experimental condition or treatment (if this is one arm of a multi-condition study)
+# Use normalized_annotations to find these values — field names vary by schema.
 context_parts = []
-assay_target = normalized_annotations.get('assayTarget', '')
-if assay_target:
-    context_parts.append(str(assay_target) if not isinstance(assay_target, list) else assay_target[0])
-tumor = normalized_annotations.get('tumorType', '')
-if tumor and not assay_target:
-    context_parts.append(str(tumor) if not isinstance(tumor, list) else tumor[0])
-if species_label and not context_parts:
-    context_parts.append(species_label.split(' ')[1] if ' ' in species_label else species_label)
+
+# Assay target (any field capturing antibody/ChIP target — check schema_props)
+for key in ('assayTarget', 'antibodyTarget', 'target'):
+    val = normalized_annotations.get(key)
+    if val:
+        context_parts.append(str(val) if not isinstance(val, list) else val[0])
+        break
+
+# Cell/tissue type — use most specific available
+for key in ('cellType', 'tissueType', 'organ', 'bodyPart', 'tissue'):
+    val = normalized_annotations.get(key)
+    if val:
+        context_parts.append(str(val) if not isinstance(val, list) else val[0])
+        break
+
+# Disease/tumor context if not already captured above
+if len(context_parts) < 2:
+    for key in ('tumorType', 'diagnosis', 'diseaseFocus'):
+        val = normalized_annotations.get(key)
+        if val:
+            context_parts.append(str(val) if not isinstance(val, list) else val[0])
+            break
+
+# Organism if non-obvious (not human, or if multiple species present)
+species_val = normalized_annotations.get('species') or normalized_annotations.get('organism')
+if species_val:
+    species_str = str(species_val) if not isinstance(species_val, list) else ', '.join(species_val)
+    if 'sapiens' not in species_str.lower() or (isinstance(species_val, list) and len(species_val) > 1):
+        context_parts.append(species_str)
 
 context_str = f" — {', '.join(context_parts)}" if context_parts else ""
 
@@ -304,16 +331,20 @@ def fetch_schema_enums(schema_uri: str) -> dict[str, list[str]]:
     return enums
 ```
 
-**When to use which schema for behavioral/model organism data** (NF-OSI dictionary; adjust template names for other dictionaries):
-- `{uri_prefix}behavioralassaytemplate` — covers both human clinical behavioral instruments AND animal model behavioral assays (open field test, rotarod, elevated plus maze, grooming, etc.). Use this for behavioral data of any species. Note: this schema always requires `compoundName`, `compoundDose`, and `compoundDoseUnit` — for non-drug studies, set these to `'Not Applicable'` / `'0'` / `'Not Applicable'` respectively. Also requires `dataType` (use `'behavioral data'` for behavioral studies).
-- `{uri_prefix}biologicalassaydatatemplate` — has no enum constraints at all; not useful for controlled-vocabulary annotation. Avoid.
-- `{uri_prefix}generalmeasuredatatemplate` — general quantitative measurements; has the broadest assay enum (202 values including RNA-seq, imaging, etc.).
+**Schema template selection — general decision process:**
 
-**ChIP-seq / CUT&RUN / ATAC-seq schema selection:**
-- If the metadata dictionary has an `epigenomicsassaytemplate` (or similar), use it for ChIP-seq, CUT&RUN, CUT&TAG, or ATAC-seq datasets.
-- The epigenomics template typically includes `assayTarget` (antibody target), `assayTargetDescription`, and `referenceSet` (genome build) fields not present in other templates.
-- If no epigenomics-specific template exists, fall back to `generalmeasuredatatemplate` and populate `assayTarget` as a free-text annotation.
-- Identify the assay target from: GEO `!Series_extract_protocol_ch1` (look for antibody name), ENA `library_selection` field, or the experiment title in BioStudies.
+1. Fetch the list of available templates from `synapse.schema.metadata_dictionary_url` in `config/settings.yaml`
+2. Determine the assay type confirmed from source repository metadata (not just the paper abstract)
+3. Match the assay to the most specific template available:
+   - **Chromatin accessibility / histone marks** (ChIP-seq, CUT&RUN, CUT&TAG, ATAC-seq): use an epigenomics-specific template if one exists. These typically add `assayTarget`, `assayTargetDescription`, and `referenceSet` (genome build) fields not found in general templates. Identify the assay target from GEO `!Series_extract_protocol_ch1`, ENA `library_selection`, or the experiment title.
+   - **Behavioral / phenotype data** (open field, rotarod, clinical questionnaires): use a behavioral template if available. These often require compound/drug fields — for non-drug studies, set compound fields to `'Not Applicable'` / `'0'` / `'Not Applicable'`.
+   - **Single-cell data** (scRNA-seq, snATAC-seq, scADT): use a single-cell template if available. Verify `library_source = 'TRANSCRIPTOMIC SINGLE CELL'` or protocol mentions 10x Chromium / Drop-seq / Smart-seq2 before using.
+   - **Mass spectrometry / proteomics**: use a proteomics template if available.
+   - **General / fallback**: use the broadest available template (often one with the largest `assay` enum) when no assay-specific template matches.
+4. After selection, always call `fetch_schema_properties(schema_uri)` to get the actual field list for that template — never assume field names from a different template carry over.
+5. If the assay enum in the selected template does not contain the study's assay type, try the next most general template before falling back. Record which template was selected and why in the curation comment.
+
+**Template selection must be based on the source repository's library metadata** (ENA `library_strategy`, GEO `!Series_instrument_model`/`!Sample_library_strategy`), not inferred from the publication title. The title may describe the biology; the repository fields describe the technology.
 
 ### Step A2 — Fetch ALL schema property names (not just enums)
 
@@ -555,7 +586,7 @@ print(f"  Normalized {len(normalized)} annotation fields")
 - `tumorType` is required on every file — derive from paper/abstract
 - `specimenID` is one per file — parse from filename prefix, never a multi-value list
 - `fileFormat` must match schema enum exactly — strip `.gz`/`.zip` (e.g. `fastq.gz` → `fastq`)
-- `manifestation` at project level: use "Low-Grade Glioma NOS" NOT "Low Grade Glioma"
+- All controlled-vocabulary fields: use exact enum values from the schema — spacing and capitalization matter (e.g., a schema may require "Low-Grade Glioma NOS" not "Low Grade Glioma")
 
 ### Step D — Apply annotations to File entities
 
@@ -583,7 +614,7 @@ for child in syn.getChildren(files_folder_id, includeTypes=['file']):
     syn.store(f)
 ```
 
-**Shared across all files** (values that are the same for every file in the dataset — check schema_props for exact field names): fields like `assay`, `species`, `diagnosis`, `tumorType`, `platform`, `libraryPreparationMethod`, `libraryStrand`, `libraryPrep`, `specimenPreparationMethod`, `dissociationMethod`, `study`, `externalAccessionID`, `externalRepository`, `dataSubtype`, `sex`, `organ`, `isCellLine`, `isPrimaryCell`, `nucleicAcidSource`, `runType`, `readLength` — populate all that apply.
+**Shared across all files** (values that are the same for every file in the dataset): call `fetch_schema_properties(schema_uri)` to get the full field list, then populate every field that has a value shared across the whole dataset (assay type, organism, disease/diagnosis, instrument model, library prep method, study link, external accession reference, data processing level, etc.). The schema is the authoritative source — do not consult a separate config list for file fields.
 
 > **CRITICAL — NEVER set on File entities:**
 > - **`resourceStatus`** — belongs ONLY on the Project and Dataset entity annotations. Setting it on files causes the Datasets tab to show a `resourceStatus` column with values that data managers must manually remove.
@@ -599,23 +630,34 @@ for child in syn.getChildren(files_folder_id, includeTypes=['file']):
 
 ## Project-Level Annotations
 
+Read `curation_checklist.required_project_annotations` from `config/settings.yaml` to get the field names for your portal. Build the annotations dict dynamically from those field names and the populated values. The pattern below illustrates the approach — substitute actual field names from config:
+
 ```python
+import yaml
+
+with open('config/settings.yaml') as f:
+    cfg = yaml.safe_load(f)
+
+required_fields = cfg['curation_checklist']['required_project_annotations']
+# 'populated_values' is a dict you built from source metadata:
+#   { field_name: value_or_list, ... }
+# Match each required field to its populated value.
+
 ann = syn.restGET(f'/entity/{project_id}/annotations2')
-ann['annotations'] = {
-    'studyName':               {'type': 'STRING', 'value': [project_name]},
-    'studyStatus':             {'type': 'STRING', 'value': ['Completed']},
-    'dataStatus':              {'type': 'STRING', 'value': ['Available']},
-    'diseaseFocus':            {'type': 'STRING', 'value': disease_focus_list},
-    'manifestation':           {'type': 'STRING', 'value': manifestation_list},
-    'dataType':                {'type': 'STRING', 'value': data_type_list},
-    'studyLeads':              {'type': 'STRING', 'value': study_leads_list},
-    'institutions':            {'type': 'STRING', 'value': institutions_list},
-    'fundingAgency':           {'type': 'STRING', 'value': funding_agency_list},
-    'resourceStatus':          {'type': 'STRING', 'value': ['pendingReview']},
-    'alternateDataRepository': {'type': 'STRING', 'value': alternate_data_repos},
-    'pmid':                    {'type': 'STRING', 'value': [pmid]} if pmid else {},
-    'doi':                     {'type': 'STRING', 'value': [doi]}  if doi  else {},
-}
+ann['annotations'] = {}
+for field in required_fields:
+    val = populated_values.get(field)
+    if val is not None:
+        if not isinstance(val, list):
+            val = [val]
+        ann['annotations'][field] = {'type': 'STRING', 'value': val}
+
+# pmid and doi are always set if available (standard regardless of schema)
+if pmid:
+    ann['annotations']['pmid'] = {'type': 'STRING', 'value': [str(pmid)]}
+if doi:
+    ann['annotations']['doi']  = {'type': 'STRING', 'value': [str(doi)]}
+
 syn.restPUT(f'/entity/{project_id}/annotations2', json.dumps(ann))
 ```
 
@@ -623,11 +665,49 @@ syn.restPUT(f'/entity/{project_id}/annotations2', json.dumps(ann))
 1. **PubMed GrantList** (most reliable): `grants = art.get('GrantList', [])` → `{g.get('Agency') for g in grants}`
 2. **Acknowledgements section**: look for "funded by", "supported by" phrases
 3. **Repository metadata**: Zenodo records sometimes list funders in `metadata.grants`
-4. **Fallback**: `['Not Applicable (External Study)']`
+4. **Fallback**: a "not applicable" placeholder — set the specific string from your portal's controlled vocabulary
 
-**`studyStatus`**: Always `Completed` for published studies with deposited data. Never "Active".
+**Study completion status**: Always set to the "completed" value for published studies with deposited data. Never "active" or "in progress" for public archival deposits.
 
-**`dataType` vocabulary**: `geneExpression`, `genomicVariants`, `proteomics`, `drugScreen`, `immunoassay`, `image`, `surveyData`, `clinicalData`, `other`
+**Assay/data type vocabulary**: Read valid values from the schema enum at runtime — do not hardcode. Infer the category from the repository's library strategy or assay description.
+
+---
+
+## Post-Curation GitHub Comment
+
+After annotating a project, post a comment on its study-review GitHub issue. This is required — it is the handoff to human reviewers. Use `scripts/github_issue.py`'s `post_issue_comment(issue_number, body)`.
+
+Structure the comment as:
+
+```markdown
+## Curation Summary
+
+**Schema template:** `{schema_uri}` (selected because: {reason})
+**Source metadata fetched from:** {repositories queried}
+
+### Annotations set
+
+| Field | Value | Source |
+|-------|-------|--------|
+| studyLeads | {value} | PubMed AuthorList / BioStudies / repository |
+| species | {value} | ENA scientific_name / GEO organism field |
+| assay | {value} | ENA library_strategy / GEO library_strategy |
+| platform | {value} | ENA instrument_model / GEO instrument_model |
+| ... | ... | ... |
+
+### Approximations and gaps
+
+- **{field}**: Source value "{raw_value}" is not in schema enum. Used closest match "{chosen_value}". Consider adding "{raw_value}" to the vocabulary.
+- (or: No gaps — all field values matched schema enums exactly)
+
+### Items for human review
+
+- [ ] {Any ambiguity that requires a human decision}
+- [ ] {Any field that could not be populated}
+- [ ] {Any mismatch between paper description and repository metadata}
+```
+
+Omit sections that have no content (e.g., omit "Approximations and gaps" if none). Keep the comment factual and actionable — data managers use it to decide whether to approve or request fixes.
 
 ---
 
@@ -661,7 +741,7 @@ if raw_data_folder:
     # Link files as dataset items, set columnIds, annotate (same as Steps 2-4 above)
 ```
 
-If the existing project is portal-managed (not in agent state table), **do not write to it**. Create a JIRA ticket flagged as "manual action required" instead.
+If the existing project is portal-managed (not in agent state table), **do not write to it**. Post a comment on the existing study-review issue (or create a new one) flagging the new accession as a manual action required.
 
 ---
 
@@ -671,7 +751,7 @@ When a repository contains `.zip` files, do NOT attempt to download/extract in a
 
 1. Create a `File` entity pointing to the zip's direct download URL (as normal)
 2. Add annotation `needsExtraction: true` to that File entity
-3. Create a JIRA ticket flagged as `interactive-processing-required`
+3. Note the zip in the post-curation GitHub comment under "Items for human review" with the label `interactive-processing-required`
 4. Note the zip in the wiki under "Pending Data Manager Actions"
 
 ```python
@@ -996,19 +1076,17 @@ if source_meta_folder:
 
 ## `bind_schema()` Helper
 
-**Checking if a schema is already bound** — use `js.validate()`, NOT the REST endpoint `/entity/{id}/json_schema_binding` (that returns 404 unconditionally):
+**Checking if a schema is already bound** — two valid approaches:
+- REST: `syn.restGET(f'/entity/{folder_id}/schema/binding')` — returns the binding info (schema `$id`, version). Use this when you only need to know *what* schema is bound.
+- Python SDK: `syn.service('json_schema').validate(folder_id)` — validates annotations against the bound schema and returns the schema `$id`. Use this when you want to validate at the same time.
+- Do NOT use `/entity/{id}/jsonschema/binding` — that endpoint does not exist and returns 404.
 
 ```python
 def get_bound_schema_uri(syn, folder_id: str) -> str | None:
     """Returns schema URI if a schema is bound to this folder, else None."""
     try:
-        js = syn.service('json_schema')
-        val = js.validate(folder_id)
-        schema_id = val.get('schema$id', '')
-        if schema_id:
-            prefix = 'https://repo-prod.prod.sagebase.org/repo/v1/schema/type/registered/'
-            return schema_id[len(prefix):] if schema_id.startswith(prefix) else schema_id
-        return None
+        binding = syn.restGET(f'/entity/{folder_id}/schema/binding')
+        return binding.get('jsonSchemaVersionInfo', {}).get('$id')
     except Exception:
         return None  # 404 means no schema bound
 ```
@@ -1053,41 +1131,57 @@ Run this after Step 6 (project creation) and before JIRA notifications. The audi
 
 ### Audit Lessons from Live Testing
 
-These issues were discovered when the audit was run on real agent-created projects (2026-03-28) and are not always caught at creation time:
+These issues were discovered when the audit was run on real agent-created projects (2026-03-28) and are not always caught at creation time. The `→ Standard N` references point to the corresponding rule in the **Annotation Quality Standards** section of CLAUDE.md.
 
-1. **All file annotations were missing** — projects created before the annotation step was enforced had zero file-level annotations. The audit auto-fix sweep adds the mechanical fields; the reasoning pass adds domain-knowledge fields.
+1. **All file annotations were missing** — projects created before the annotation step was enforced had zero file-level annotations. The audit auto-fix sweep adds the mechanical fields; the reasoning pass adds domain-knowledge fields. → Standard 1 (fetch schema first)
 
-2. **`manifestation='Unspecified'` is not valid portal vocabulary** — treat it the same as missing. Valid behavioral/neurological manifestations in the portal include `'Behavioral'`, `'Cognition'`, `'Memory'`, `'Pain'` in addition to tumor types. Check the portal vocab list explicitly.
+2. **`manifestation='Unspecified'` is not valid portal vocabulary** — treat it the same as missing. Check the `annotations.manifestation_values` list in `config/settings.yaml` for valid values. → Standard 9 (vocabulary gaps: flag, don't silently drop)
 
-3. **`studyLeads=['Unknown']` — search PubMed first** — ENA projects without a PMID often have an associated publication findable via title search. Include `instrument_model`, center name, and key terms in the query.
+3. **`studyLeads=['Unknown']` — search PubMed first** — ENA projects without a PMID often have an associated publication findable via title search. Include `instrument_model`, center name, and key terms in the query. → Standard 3 (investigator fields: use paper authors, not repository submitters)
 
-4. **Schema enum extraction must use the `properties` layer** — a naive recursive search for any dict with `'enum'` key picks up enum values from unrelated sub-objects (e.g. a clinical questionnaire block inside the behavioral template returned `'Child Behavior Checklist for Ages 1.5-5'` as the assay value for Drosophila grooming data). Always traverse via `schema['properties']`.
+4. **Schema enum extraction must use the `properties` layer** — a naive recursive search for any dict with `'enum'` key picks up enum values from unrelated sub-objects (e.g. a clinical questionnaire block inside the behavioral template returned `'Child Behavior Checklist for Ages 1.5-5'` as the assay value for Drosophila grooming data). Always traverse via `schema['properties']`. → Standard 1 (schema enums are ground truth)
 
-5. **`{uri_prefix}behavioralassaytemplate` covers both human clinical and animal model behavioral data** — its assay enum includes animal tests (open field, rotarod, elevated plus maze, etc.) alongside clinical questionnaires. It always requires `compoundName`/`compoundDose`/`compoundDoseUnit`; set these to `'Not Applicable'`/`'0'`/`'Not Applicable'` for non-drug studies. Also requires `dataType` — use `'behavioral data'`. `{uri_prefix}biologicalassaydatatemplate` has no enum constraints at all and should be avoided.
+5. **`{uri_prefix}behavioralassaytemplate` covers both human clinical and animal model behavioral data** — its assay enum includes animal tests (open field, rotarod, elevated plus maze, etc.) alongside clinical questionnaires. It always requires `compoundName`/`compoundDose`/`compoundDoseUnit`; set these to `'Not Applicable'`/`'0'`/`'Not Applicable'` for non-drug studies. Also requires `dataType` — use `'behavioral data'`. `{uri_prefix}biologicalassaydatatemplate` has no enum constraints at all and should be avoided. → Standard 6 (assay subtype fields: verify from source metadata)
 
-6. **Dataset `columnIds` count may be stale** — projects created before the column list was expanded from 9 to 16 need their columnIds updated.
+6. **Dataset `columnIds` may be stale** — projects created before the column list was expanded need their columnIds updated. Build `ANNOTATION_COLUMNS` dynamically from `curation_checklist.dataset_column_fields` in config rather than hardcoding a count.
 
-7. **Schema binding was missing on all ENA/Zenodo projects** — the binding step was added to the creation workflow but not retroactively applied. The audit catches and fixes this.
+7. **Schema binding was missing on all ENA/Zenodo projects** — the binding step was added to the creation workflow but not retroactively applied. The audit catches and fixes this. → Standard 1 (schema is ground truth — must be bound)
 
-8. **Dataset item versions go stale after annotation fixes** — every `syn.store(f)` or `annotations2` PUT increments the file version. If the audit auto-fix applies file annotations (step 4b), the Dataset items end up pointing to the pre-fix version and the Datasets tab shows blank annotation columns. The version-sync check in step 4c now catches and corrects this. The root fix is to always annotate files BEFORE linking them to the Dataset (see Required order above).
+8. **Dataset item versions go stale after annotation fixes** — every `syn.store(f)` or `annotations2` PUT increments the file version. If the audit auto-fix applies file annotations, the Dataset items end up pointing to the pre-fix version and the Datasets tab shows blank annotation columns. The version-sync check in step 4c catches and corrects this. The root fix is to always annotate files BEFORE linking them to the Dataset (see Required order above).
 
-9. **`studyLeads` must be first + last/corresponding author — not the repository submitter** — ENA/ArrayExpress submitters are typically research engineers or postdocs who performed the experiment, not the PI. The BioStudies `[Author]` section lists role (`submitter`, `experiment performer`, `principal investigator`). If only a submitter is present, search bioRxiv for a preprint using the mouse model name + assay + institution. If a preprint is found, derive studyLeads from its author list (first + last). Never default to the submitter name as studyLeads without checking for a publication or preprint.
+9. **Investigator fields must be first + last/corresponding author — not the repository submitter** — ENA/ArrayExpress submitters are typically research engineers or postdocs who performed the experiment, not the PI. The BioStudies `[Author]` section lists role (`submitter`, `experiment performer`, `principal investigator`). If only a submitter is present, search bioRxiv for a preprint using the model name + assay + institution. If a preprint is found, derive the investigator field from its author list (first + last). Never default to the submitter name without checking for a publication or preprint. → Standard 3
 
-10. **`species` must be verified from the repository taxon field, never inferred** — A dataset can use human, mouse, zebrafish, or Drosophila regardless of the disease focus. Always read `scientific_name` (ENA filereport), `!Series_sample_taxid` (GEO SOFT), or `Organism` (BioStudies). A dataset submitted by a mouse lab may contain human cell data (e.g. patient-derived iPSCs or bone marrow aspirates). This was the root cause of species being set to Mus musculus on a human scRNA-seq dataset (GSE196652).
+10. **Organism/species fields must be verified from the repository taxon field, never inferred** — A dataset can use human, mouse, zebrafish, or Drosophila regardless of the disease focus. Always read `scientific_name` (ENA filereport), `!Series_sample_taxid` (GEO SOFT), or `Organism` (BioStudies). A dataset submitted by a mouse lab may contain human cell data (e.g. patient-derived iPSCs or bone marrow aspirates). This was the root cause of species being set to Mus musculus on a human scRNA-seq dataset (GSE196652). → Standard 4
 
-11. **`assay` must reflect single-cell vs bulk** — When `library_source = 'TRANSCRIPTOMIC SINGLE CELL'`, `library_strategy` mentions scRNA, or the protocol names 10x Chromium / Fluidigm C1 / Drop-seq / Smart-seq2 (per-cell), the assay is `'single-cell RNA-seq'`, NOT `'RNA-seq'`. Setting bulk RNA-seq on a scRNA-seq dataset causes the wrong schema to be selected (rnaseqtemplate vs scrnaseqtemplate), which cascades to wrong annotation fields and wrong Curator Grid validation.
+11. **Assay type fields must reflect single-cell vs bulk** — When `library_source = 'TRANSCRIPTOMIC SINGLE CELL'`, `library_strategy` mentions scRNA, or the protocol names 10x Chromium / Fluidigm C1 / Drop-seq / Smart-seq2 (per-cell), the assay is `'single-cell RNA-seq'`, NOT `'RNA-seq'`. Setting bulk RNA-seq on a scRNA-seq dataset causes the wrong schema to be selected, which cascades to wrong annotation fields and wrong Curator Grid validation. → Standard 6
 
-12. **Schema-specific fields must be populated at creation, not as a post-hoc fix** — After binding the schema, call `fetch_schema_properties(schema_uri)` to get the full list of fields the schema defines. For each property present in the source repository metadata (sample attributes, sample characteristics, protocol/library fields), populate it. Common field groups to look for: model organism descriptors (age, sex, genotype, species, system name), library prep details (dissociation method, specimen preparation, cell line flag, run type, read pair, library prep method, strand), and any disease-specific genotype or treatment fields. Never leave a schema property blank if the source data contains the corresponding value.
+12. **Schema-specific fields must be populated at creation, not as a post-hoc fix** — After binding the schema, call `fetch_schema_properties(schema_uri)` to get the full list of fields the schema defines. For each property present in the source repository metadata (sample attributes, sample characteristics, protocol/library fields), populate it. Common field groups to look for: model organism descriptors (age, sex, genotype, species, system name), library prep details (dissociation method, specimen preparation, cell line flag, run type, read pair, library prep method, strand), and any disease-specific genotype or treatment fields. Never leave a schema property blank if the source data contains the corresponding value. → Standard 1
 
-13. **Dataset ANNOTATION_COLUMNS must cover all schema properties** — Do not use a hardcoded column list. Build `ANNOTATION_COLUMNS` dynamically: start with the universal base columns, then append every property defined in the bound schema that is not already in the base list. This ensures the Dataset schema matches the actual schema used, regardless of which portal or metadata dictionary is configured.
+13. **Dataset ANNOTATION_COLUMNS must cover all schema properties** — Do not use a hardcoded column list or count. Build `ANNOTATION_COLUMNS` dynamically: start with the base columns from `curation_checklist.dataset_column_fields` in config, then append every property defined in the bound schema that is not already in the base list. This ensures the Dataset view matches the actual schema used. → Standard 1
 
-14. **`resourceStatus` must NOT be set on individual File entities** — Data managers have consistently requested removal of `resourceStatus` from all files. This annotation belongs only on the **Project** and **Dataset entity** (as an entity-level annotation). The audit Phase 1 auto-fix now **removes** `resourceStatus` from any file that has it. Do not set it during creation either (see the CRITICAL note in Step D above).
+14. **Resource/review status must NOT be set on individual File entities** — Data managers have consistently requested removal of this annotation from files. It belongs only on the **Project** and **Dataset entity** (as an entity-level annotation). The audit Phase 1 auto-fix now **removes** it from any file that has it. Do not set it during creation either.
 
 15. **`filename` annotation causes duplicate columns** — Do NOT add a custom `filename` annotation to files. The Synapse system `name` property serves as the filename in Dataset views. Adding `filename` as a custom annotation creates a second column that data managers must manually clean up. The audit Phase 1 auto-fix removes `filename` annotations from files.
 
-16. **Dataset names must be descriptive** — Names like `GEO_GSE120686` are not human-readable. Use the format `{assay_label} — {context} ({repository} {accession_id})` where context is the tumor type, disease, or assay target (for ChIP-seq). For example: `"RNA-seq — MPNST (GEO GSE120686)"` or `"ChIP-seq H3K27ac — NF1 (GEO GSE120686)"`. The Dataset name is the first thing a data manager sees in the Datasets tab.
+16. **Dataset names must be descriptive and specific** — Names like `GEO_GSE120686` are not useful. The Dataset name is the first thing a data manager sees in the Datasets tab, so it should convey what the data actually is without having to open the record.
 
-17. **Mint a stable Dataset version after all annotations are final** — After creating or updating a Dataset and confirming all annotations are correct, call `syn.restPOST(f'/entity/{dataset_id}/version', ...)` to mint a permanent snapshot. This gives data managers a stable, citable version to reference. Data managers will request this explicitly if it is missing.
+    Recommended format: `{assay} — {specific biological context} ({repository} {accession_id})`
+
+    The "specific biological context" should include enough information to distinguish this dataset from others in the same project or portal:
+    - Tissue type, cell type, or tumor type (not just the disease name)
+    - Organism or model system if not obvious from context
+    - Assay target for antibody-based assays (ChIP-seq, CUT&RUN, etc.)
+    - Study condition or treatment if the dataset is one arm of a multi-condition study
+
+    Examples of **insufficient** names: `"RNA-seq data (GEO GSE120686)"`, `"tumor samples (ENA PRJEB12345)"`
+
+    Examples of **sufficient** names: `"RNA-seq — peripheral blood mononuclear cells, treatment vs. control (GEO GSE120686)"`, `"ChIP-seq H3K27ac — Schwann cells (ENA PRJEB12345)"`, `"Whole exome sequencing — patient-derived xenograft lines (SRA SRP123456)"`
+
+17. **Mint a stable Dataset version after all annotations are final** — After creating or updating a Dataset and confirming all annotations are correct, call `syn.restPOST(f'/entity/{dataset_id}/version', ...)` to mint a permanent snapshot. This gives data managers a stable, citable version to reference. Data managers will request this explicitly if it is missing. The polish workflow (Step 7) and the daily creation workflow both must mint versions as a final step after annotations are confirmed.
+
+18. **Sample-varying fields set to a single study-level value on all files** — After initial annotation, check whether any field that can vary by sample (genotype, condition, sex, age, tissue, cell type, preparation method, or any treatment/perturbation field) has the same value on every file in the dataset. If the study has multiple experimental groups, this is almost always wrong — the study-level value was copied to all files instead of mapping each file to its source sample. Fix by: (a) fetching the per-sample metadata record for each file's run/sample accession, (b) mapping each file to its sample, (c) re-applying those fields per-file with the correct per-sample value. This is the second thing to check in the audit after mechanical field presence — it is a correctness error, not just a completeness gap. → Standard 5
+
+19. **Schema completeness check at audit time** — Phase 2 (agent reasoning) must include an explicit schema coverage step: call `fetch_schema_properties(schema_uri)` on the bound schema, list every property that is missing from each file's annotations, and for each missing property attempt to resolve it from the file's per-sample source metadata. Properties that cannot be resolved must be documented in the GitHub curation comment under a "fields not populated" section with the reason. The audit output (`audit_results.json`) must include a `missing_schema_fields` list per project. → Standards 5, 11
 
 ### `created_projects.json` Schema (output of Step 6, input to audit)
 
@@ -1532,7 +1626,7 @@ for proj in created:
         if schema_uri and files_folder_id:
             try:
                 try:
-                    binding = syn.restGET(f'/entity/{files_folder_id}/jsonschema/binding')
+                    binding = syn.restGET(f'/entity/{files_folder_id}/schema/binding')
                     bound_uri = binding.get('jsonSchemaVersionInfo', {}).get('$id', '')
                     print(f"    Schema: OK ({bound_uri})")
                 except Exception:
