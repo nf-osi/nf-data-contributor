@@ -150,61 +150,46 @@ syn.restPUT(f'/entity/{dataset_id}/annotations2', json.dumps(ann))
 
 ### Step 4 — Define columns on the Dataset entity
 
-Without column definitions, the Dataset appears empty in the UI even if files have full annotations.
-`facetType: "enumeration"` enables the Filter panel for that column — set it on all categorical annotation columns.
-Leave `facetType` unset for high-cardinality identifier columns (`specimenID`, `individualID`, `externalAccessionID`).
+The Dataset columns must reflect the annotations that are actually on the files — nothing more, nothing less.
+Derive them directly from the file annotations after all files have been annotated.
+`facetType: "enumeration"` enables the Filter panel; set it on all columns except high-cardinality identifiers.
 
 ```python
-# (col_name, col_type, max_size, facet_type)
-# facet_type = 'enumeration' | None
-#
-# BASE_ANNOTATION_COLUMNS are universal across all portals/schemas.
-# Schema-specific columns (e.g. genotype fields, model organism fields)
-# are appended dynamically by reading the bound schema's properties —
-# do NOT hardcode domain-specific field names here.
-BASE_ANNOTATION_COLUMNS = [
-    ('study',                    'STRING', 256, 'enumeration'),
-    ('assay',                    'STRING', 128, 'enumeration'),
-    ('species',                  'STRING', 128, 'enumeration'),
-    ('diagnosis',                'STRING', 256, 'enumeration'),
-    ('tumorType',                'STRING', 256, 'enumeration'),
-    ('platform',                 'STRING', 256, 'enumeration'),
-    ('libraryPreparationMethod', 'STRING', 128, 'enumeration'),
-    ('libraryStrand',            'STRING',  64, 'enumeration'),
-    ('nucleicAcidSource',        'STRING',  64, 'enumeration'),
-    ('organ',                    'STRING',  64, 'enumeration'),
-    ('dataSubtype',              'STRING',  64, 'enumeration'),
-    ('fileFormat',               'STRING',  64, 'enumeration'),
-    ('resourceType',             'STRING',  64, 'enumeration'),
-    # NOTE: resourceStatus is intentionally EXCLUDED from Dataset column definitions.
-    # It is an entity-level annotation on the Project itself,
-    # NOT a per-file annotation. Never set resourceStatus on individual File entities.
-    ('externalAccessionID',      'STRING', 128, None),           # one value per dataset — not a useful facet
-    ('externalRepository',       'STRING',  64, 'enumeration'),
-    ('specimenID',               'STRING', 128, None),           # high-cardinality identifier
-    ('individualID',             'STRING', 128, None),           # high-cardinality identifier
-]
+import json
 
-# Extend with schema-specific properties fetched at runtime
-HIGH_CARDINALITY = {'specimenID', 'individualID', 'externalAccessionID', 'name', 'id'}
-BASE_NAMES = {c[0] for c in BASE_ANNOTATION_COLUMNS}
-schema_props = fetch_schema_properties(schema_uri)   # defined in Step A2 above
-ANNOTATION_COLUMNS = list(BASE_ANNOTATION_COLUMNS)
-for prop_name, prop_def in schema_props.items():
-    if prop_name in BASE_NAMES:
-        continue
-    has_enum = bool(prop_def.get('enum')) or any(
-        'enum' in s for s in prop_def.get('anyOf', [])
-    )
-    facet = None if prop_name in HIGH_CARDINALITY else ('enumeration' if has_enum else None)
-    size = 256 if prop_def.get('maxLength', 64) > 128 else (128 if prop_def.get('maxLength', 64) > 64 else 64)
-    ANNOTATION_COLUMNS.append((prop_name, 'STRING', size, facet))
+# High-cardinality identifier fields — skip faceting
+HIGH_CARDINALITY = {'specimenID', 'individualID', 'externalAccessionID', 'name', 'id',
+                    'sampleId', 'runAccession', 'biosampleId'}
+
+# NOTE: resourceStatus is intentionally EXCLUDED — it is a project-level annotation,
+# never a per-file annotation. Never add it to Dataset column definitions.
+EXCLUDE_COLS = {'resourceStatus', 'filename'}
+
+# Collect all unique annotation keys from the files in this dataset
+all_annotations = {}   # key -> annotation value object (for type inference)
+for file_id in file_entity_ids:
+    ann = syn.restGET(f'/entity/{file_id}/annotations2')
+    for key, val_obj in ann.get('annotations', {}).items():
+        if key not in all_annotations:
+            all_annotations[key] = val_obj
 
 col_ids = []
-for col_name, col_type, col_size, facet_type in ANNOTATION_COLUMNS:
-    body = {'name': col_name, 'columnType': col_type, 'maximumSize': col_size}
-    if facet_type:
-        body['facetType'] = facet_type
+for col_name in sorted(all_annotations):
+    if col_name in EXCLUDE_COLS:
+        continue
+    val_obj = all_annotations[col_name]
+    ann_type = val_obj.get('type', 'STRING')
+    if ann_type == 'DOUBLE':
+        body = {'name': col_name, 'columnType': 'DOUBLE'}
+    elif ann_type in ('LONG', 'INTEGER'):
+        body = {'name': col_name, 'columnType': 'INTEGER'}
+    else:
+        values = val_obj.get('value', [])
+        max_len = max((len(str(v)) for v in values), default=64)
+        size = 500 if max_len > 250 else (256 if max_len > 128 else (128 if max_len > 64 else 64))
+        body = {'name': col_name, 'columnType': 'STRING', 'maximumSize': size}
+        if col_name not in HIGH_CARDINALITY:
+            body['facetType'] = 'enumeration'
     col = syn.restPOST('/column', json.dumps(body))
     col_ids.append(col['id'])
 
@@ -1143,7 +1128,7 @@ These issues were discovered when the audit was run on real agent-created projec
 
 5. **`{uri_prefix}behavioralassaytemplate` covers both human clinical and animal model behavioral data** — its assay enum includes animal tests (open field, rotarod, elevated plus maze, etc.) alongside clinical questionnaires. It always requires `compoundName`/`compoundDose`/`compoundDoseUnit`; set these to `'Not Applicable'`/`'0'`/`'Not Applicable'` for non-drug studies. Also requires `dataType` — use `'behavioral data'`. `{uri_prefix}biologicalassaydatatemplate` has no enum constraints at all and should be avoided. → Standard 6 (assay subtype fields: verify from source metadata)
 
-6. **Dataset `columnIds` may be stale** — projects created before the column list was expanded need their columnIds updated. Build `ANNOTATION_COLUMNS` dynamically from `curation_checklist.dataset_column_fields` in config rather than hardcoding a count.
+6. **Dataset `columnIds` may be stale or missing** — projects created before this approach was adopted may have no `columnIds` or a hardcoded subset. Rebuild them dynamically from the actual file annotations (see Step 4).
 
 7. **Schema binding was missing on all ENA/Zenodo projects** — the binding step was added to the creation workflow but not retroactively applied. The audit catches and fixes this. → Standard 1 (schema is ground truth — must be bound)
 
@@ -1157,7 +1142,7 @@ These issues were discovered when the audit was run on real agent-created projec
 
 12. **Schema-specific fields must be populated at creation, not as a post-hoc fix** — After binding the schema, call `fetch_schema_properties(schema_uri)` to get the full list of fields the schema defines. For each property present in the source repository metadata (sample attributes, sample characteristics, protocol/library fields), populate it. Common field groups to look for: model organism descriptors (age, sex, genotype, species, system name), library prep details (dissociation method, specimen preparation, cell line flag, run type, read pair, library prep method, strand), and any disease-specific genotype or treatment fields. Never leave a schema property blank if the source data contains the corresponding value. → Standard 1
 
-13. **Dataset ANNOTATION_COLUMNS must cover all schema properties** — Do not use a hardcoded column list or count. Build `ANNOTATION_COLUMNS` dynamically: start with the base columns from `curation_checklist.dataset_column_fields` in config, then append every property defined in the bound schema that is not already in the base list. This ensures the Dataset view matches the actual schema used. → Standard 1
+13. **Dataset columns must reflect actual file annotations** — Do not use a hardcoded column list. After annotating all files, derive `columnIds` directly from the annotation keys present on those files (see Step 4). This ensures the Dataset view shows exactly the columns that have data, no more and no less. → Standard 1
 
 14. **Resource/review status must NOT be set on individual File entities** — Data managers have consistently requested removal of this annotation from files. It belongs only on the **Project** and **Dataset entity** (as an entity-level annotation). The audit Phase 1 auto-fix now **removes** it from any file that has it. Do not set it during creation either.
 
@@ -1551,51 +1536,59 @@ for proj in created:
                 else:
                     print(f"    Dataset items: OK ({len(current_items)} items)")
 
-                # columnIds
-                if not ds_body.get('columnIds'):
-                    col_ids = []
-                    for col_name, col_type, col_size, facet_type in ANNOTATION_COLUMNS:
-                        body = {'name': col_name, 'columnType': col_type, 'maximumSize': col_size}
-                        if facet_type:
-                            body['facetType'] = facet_type
+                # columnIds — rebuild from actual file annotations
+                HIGH_CARDINALITY_AUDIT = {'specimenID', 'individualID', 'externalAccessionID',
+                                          'name', 'id', 'sampleId', 'runAccession', 'biosampleId'}
+                EXCLUDE_COLS_AUDIT = {'resourceStatus', 'filename'}
+
+                # Collect annotation keys from files
+                all_ann_audit = {}
+                for item in ds_body.get('items', []):
+                    fid = item.get('entityId')
+                    if not fid:
+                        continue
+                    try:
+                        fann = syn.restGET(f'/entity/{fid}/annotations2')
+                        for k, v in fann.get('annotations', {}).items():
+                            if k not in all_ann_audit:
+                                all_ann_audit[k] = v
+                    except Exception:
+                        pass
+
+                expected_col_names = {k for k in all_ann_audit if k not in EXCLUDE_COLS_AUDIT}
+                existing_col_ids = ds_body.get('columnIds', [])
+                existing_col_names = set()
+                for cid in existing_col_ids:
+                    try:
+                        existing_col_names.add(syn.restGET(f'/column/{cid}')['name'])
+                    except Exception:
+                        pass
+
+                if expected_col_names != existing_col_names:
+                    new_col_ids = []
+                    for col_name in sorted(expected_col_names):
+                        val_obj = all_ann_audit[col_name]
+                        ann_type = val_obj.get('type', 'STRING')
+                        if ann_type == 'DOUBLE':
+                            body = {'name': col_name, 'columnType': 'DOUBLE'}
+                        elif ann_type in ('LONG', 'INTEGER'):
+                            body = {'name': col_name, 'columnType': 'INTEGER'}
+                        else:
+                            values = val_obj.get('value', [])
+                            max_len = max((len(str(v)) for v in values), default=64)
+                            size = 500 if max_len > 250 else (256 if max_len > 128 else (128 if max_len > 64 else 64))
+                            body = {'name': col_name, 'columnType': 'STRING', 'maximumSize': size}
+                            if col_name not in HIGH_CARDINALITY_AUDIT:
+                                body['facetType'] = 'enumeration'
                         col = syn.restPOST('/column', json.dumps(body))
-                        col_ids.append(col['id'])
+                        new_col_ids.append(col['id'])
                     ds_body2 = syn.restGET(f'/entity/{dataset_id}')
-                    ds_body2['columnIds'] = col_ids
+                    ds_body2['columnIds'] = new_col_ids
                     syn.restPUT(f'/entity/{dataset_id}', json.dumps(ds_body2))
-                    result['fixes_applied'].append(f'{acc}: Dataset columnIds created')
-                    print(f"    Dataset columnIds: FIXED")
+                    result['fixes_applied'].append(f'{acc}: Dataset columnIds rebuilt from file annotations')
+                    print(f"    Dataset columnIds: FIXED — rebuilt from {len(new_col_ids)} file annotation keys")
                 else:
-                    # Check that annotation columns have facetType set
-                    # Columns are immutable — must replace any without facets
-                    FACET_COLS = {c[0] for c in ANNOTATION_COLUMNS if c[3] == 'enumeration'}
-                    ds_check = syn.restGET(f'/entity/{dataset_id}')
-                    existing_col_ids = ds_check.get('columnIds', [])
-                    needs_replace = []
-                    for cid in existing_col_ids:
-                        col_def = syn.restGET(f'/column/{cid}')
-                        if col_def['name'] in FACET_COLS and not col_def.get('facetType'):
-                            needs_replace.append(col_def['name'])
-                    if needs_replace:
-                        # Re-create annotation columns with facets; keep system cols
-                        ann_names = {c[0] for c in ANNOTATION_COLUMNS}
-                        system_col_ids = [cid for cid in existing_col_ids
-                                          if syn.restGET(f'/column/{cid}')['name'] not in ann_names]
-                        new_col_ids = []
-                        for col_name, col_type, col_size, facet_type in ANNOTATION_COLUMNS:
-                            body = {'name': col_name, 'columnType': col_type, 'maximumSize': col_size}
-                            if facet_type:
-                                body['facetType'] = facet_type
-                            col = syn.restPOST('/column', json.dumps(body))
-                            new_col_ids.append(col['id'])
-                        ds_body3 = syn.restGET(f'/entity/{dataset_id}')
-                        ds_body3['columnIds'] = system_col_ids + new_col_ids
-                        syn.restPUT(f'/entity/{dataset_id}', json.dumps(ds_body3))
-                        result['fixes_applied'].append(
-                            f'{acc}: Dataset columns re-created with facets ({len(needs_replace)} fixed)')
-                        print(f"    Dataset columnIds: FIXED facets on {needs_replace}")
-                    else:
-                        print(f"    Dataset columnIds: OK")
+                    print(f"    Dataset columnIds: OK ({len(existing_col_ids)} columns)")
 
                 # Dataset annotations
                 ds_ann = syn.restGET(f'/entity/{dataset_id}/annotations2')

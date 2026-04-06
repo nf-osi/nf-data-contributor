@@ -899,7 +899,7 @@ Before logging `synapse_created` or `dataset_added`, verify:
 - [ ] Dataset entity (`org.sagebionetworks.repo.model.table.Dataset`) is a **direct child of the project** (not inside Raw Data or any subfolder)
 - [ ] Dataset entity name is specific and informative — see naming guidance in `prompts/synapse_workflow.md`
 - [ ] Dataset entity `items` populated with all File entity IDs
-- [ ] Dataset entity `columnIds` set from `curation_checklist.dataset_column_fields` in config (read at runtime — do not hardcode a column count)
+- [ ] Dataset entity `columnIds` derived dynamically from the actual annotation keys on the files in this dataset (see Step 4 in `prompts/synapse_workflow.md`) — do not use a hardcoded list
 - [ ] All fields in `curation_checklist.required_dataset_annotations` set on the Dataset entity
 - [ ] Stable version minted on Dataset entity via `POST /entity/{id}/version`
 - [ ] Metadata schema bound to the **files folder** (not the Dataset entity, not the project) via `bind_json_schema(schema_uri, files_folder_id)`

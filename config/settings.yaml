@@ -111,32 +111,6 @@ curation_checklist:
     - study               # project name
     - studyId             # Synapse project ID
 
-  # Schema properties to include as columns in each Dataset entity's columnIds list.
-  # This drives what columns appear in the Datasets tab for this portal.
-  # Add or remove fields to match the schema properties your portal uses.
-  dataset_column_fields:
-    - study
-    - assay
-    - species
-    - tumorType
-    - diagnosis
-    - fileFormat
-    - resourceType
-    - externalAccessionID
-    - externalRepository
-    - specimenID
-    - individualID
-    - dataSubtype
-    - platform
-    - libraryPreparationMethod
-    - studyId
-    - dataType
-    - modelSystemName
-    - assayTarget
-    - sex
-    - age
-    - ageUnit
-    - organ
 
 notifications:
   github:
