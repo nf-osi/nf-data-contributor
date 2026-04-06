@@ -44,32 +44,14 @@ jobs:
       - name: Prepare task prompt
         run: |
           TODAY=$(date -u +%Y-%m-%d)
-
-          # Determine lookback date
           LOOKBACK_DAYS="${{ github.event.inputs.lookback_days || '2' }}"
           LOOKBACK_DATE=$(date -u -d "${LOOKBACK_DAYS} days ago" +%Y-%m-%d 2>/dev/null || \
                           date -u -v-${LOOKBACK_DAYS}d +%Y-%m-%d)
-
           SEED_ID="${{ github.event.inputs.seed_id }}"
+          WORKSPACE_DIR=$(python3 -c "import yaml; cfg=yaml.safe_load(open('config/settings.yaml')); print(cfg['agent']['workspace_dir'])")
 
           export TODAY LOOKBACK_DATE SEED_ID
-          # Read workspace_dir from config/settings.yaml
-          WORKSPACE_DIR=$(python3 -c "import yaml; cfg=yaml.safe_load(open('config/settings.yaml')); print(cfg['agent']['workspace_dir'])")
-          mkdir -p "${WORKSPACE_DIR}"
-
-          # Inject dates, seed ID, and workspace dir into the task template
-          # Use Python to avoid sed delimiter conflicts with URLs/slashes in SEED_ID
-          python3 -c "
-import os, pathlib, yaml
-cfg = yaml.safe_load(open('config/settings.yaml'))
-workspace_dir = cfg['agent']['workspace_dir']
-t = pathlib.Path('prompts/daily_task_template.md').read_text()
-t = t.replace('{{TODAY}}', os.environ['TODAY'])
-t = t.replace('{{LOOKBACK_DATE}}', os.environ['LOOKBACK_DATE'])
-t = t.replace('{{SEED_ID}}', os.environ.get('SEED_ID', ''))
-t = t.replace('{WORKSPACE_DIR}', workspace_dir)
-pathlib.Path(workspace_dir + '/daily_task.md').write_text(t)
-"
+          python3 scripts/prepare_task.py
 
           echo "TODAY=${TODAY}" >> "$GITHUB_ENV"
           echo "LOOKBACK_DATE=${LOOKBACK_DATE}" >> "$GITHUB_ENV"
