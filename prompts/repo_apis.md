@@ -609,8 +609,10 @@ def normalize_file_format(filename: str) -> str:
         'h5': 'h5', 'h5ad': 'h5ad', 'hdf5': 'hdf5',
         'mtx': 'mtx', 'rds': 'rds', 'rda': 'rda',
         'bed': 'bed', 'bigwig': 'bigwig', 'bw': 'bigwig',
-        'pdf': 'pdf', 'png': 'png', 'tiff': 'tiff',
+        'pdf': 'pdf', 'png': 'png', 'tiff': 'tiff', 'tif': 'tif',
         'xlsx': 'xlsx', 'xml': 'xml', 'json': 'json',
+        # Spatial transcriptomics image formats
+        'btf': 'tiff',  # BigTIFF variant → tiff
     }
     return FORMAT_MAP.get(ext, ext)
 ```
