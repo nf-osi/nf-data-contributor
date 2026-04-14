@@ -21,8 +21,10 @@ Steps performed (all code, no LLM):
   6. Upsert publication record into portal publications table (publications_table_id)
      — fetches full author list, journal, and year from PubMed via NCBI efetch
   7. Add project's Dataset entities to portal DatasetCollection (dataset_collection_id)
-  8. Update NADIA state table (NF_DataContributor_ProcessedStudies) → status = 'approved'
-  9. Post a summary comment on the GitHub issue and close the issue
+  8. Set public permissions (PUBLIC → READ + DOWNLOAD)
+  9. Update project wiki footer to reflect human review completion
+ 10. Update NADIA state table (NF_DataContributor_ProcessedStudies) → status = 'approved'
+ 11. Post a summary comment on the GitHub issue and close the issue
 
 Usage:
     python scripts/provision_approved_study.py --issue-number 42
@@ -566,7 +568,41 @@ def step7_set_public_permissions(syn, project_id):
         return False
 
 
-def step8_update_state_table(syn, cfg, project_id, metadata):
+APPROVED_FOOTER = (
+    "*Auto-curated by [@nadia-bot](https://www.synapse.org/Profile:3581191) "
+    "and reviewed by NF-OSI.*"
+)
+
+
+def step8_update_wiki_footer(syn, project_id):
+    """Replace the pending-review footer in the project wiki with the approved footer.
+
+    Before: *This project was ingested automatically by @nadia-bot on {date} and is pending data manager review.*
+    After:  *Auto-curated by [@nadia-bot](...) and reviewed by NF-OSI.*
+    """
+    import re
+    try:
+        wiki = syn.restGET(f"/entity/{project_id}/wiki")
+        markdown = wiki.get("markdown", "")
+        new_markdown = re.sub(
+            r"\*This project was ingested automatically by @nadia-bot[^\n]*\*",
+            APPROVED_FOOTER,
+            markdown,
+        )
+        if new_markdown == markdown:
+            # Footer not in expected form — append instead of silently skipping
+            new_markdown = markdown.rstrip() + "\n\n" + APPROVED_FOOTER
+        wiki["markdown"] = new_markdown
+        wiki_id = wiki["id"]
+        syn.restPUT(f"/entity/{project_id}/wiki/{wiki_id}", json.dumps(wiki))
+        print(f"  Wiki footer updated for {project_id}")
+        return True
+    except Exception as e:
+        print(f"  WARN: could not update wiki footer for {project_id}: {e}", file=sys.stderr)
+        return False
+
+
+def step9_update_state_table(syn, cfg, project_id, metadata):
     """Update NADIA state table rows for this project to status='approved'.
 
     If no rows exist (e.g. the discovery run used a different STATE_PROJECT_ID),
@@ -632,7 +668,7 @@ def step8_update_state_table(syn, cfg, project_id, metadata):
 def post_success_comment(issue_number, project_id, stats,
                          studies_view_added, files_view_added,
                          long_text_updated, pub_upserted,
-                         collection_updated, state_updated):
+                         collection_updated, wiki_updated, state_updated):
     synapse_url = f"https://www.synapse.org/Synapse:{project_id}"
 
     def status_icon(ok):
@@ -650,6 +686,7 @@ def post_success_comment(issue_number, project_id, stats,
         f"| Publication record upserted | {status_icon(pub_upserted)} |",
         f"| Added to Dataset Collection | {status_icon(collection_updated)} |",
         f"| Public permissions set | ✅ PUBLIC → READ + DOWNLOAD |",
+        f"| Wiki footer updated | {status_icon(wiki_updated)} |",
         f"| NADIA state table updated | {status_icon(state_updated)} |",
         f"| Errors | {'⚠️ ' + str(stats['errors']) if stats['errors'] else '✅ None'} |",
         "",
@@ -771,21 +808,25 @@ def main():
     print("\nStep 7: Setting public permissions...")
     step7_set_public_permissions(syn_portal, project_id)
 
-    # Step 8 — Update NADIA state table
-    print("\nStep 8: Updating NADIA state table...")
+    # Step 8 — Update wiki footer to reflect human review
+    print("\nStep 8: Updating wiki footer...")
+    wiki_updated = step8_update_wiki_footer(syn_portal, project_id)
+
+    # Step 9 — Update NADIA state table
+    print("\nStep 9: Updating NADIA state table...")
     if syn_nadia:
-        state_updated = step8_update_state_table(syn_nadia, cfg, project_id, metadata)
+        state_updated = step9_update_state_table(syn_nadia, cfg, project_id, metadata)
     else:
         state_updated = False
         print("  Skipped (SYNAPSE_AUTH_TOKEN not available)")
 
-    # Step 9 — Post completion comment and close issue
-    print("\nStep 9: Posting completion comment and closing issue...")
+    # Step 10 — Post completion comment and close issue
+    print("\nStep 10: Posting completion comment and closing issue...")
     post_success_comment(
         issue_number, project_id, stats,
         studies_view_added, files_view_added,
         long_text_updated, pub_upserted,
-        collection_updated, state_updated,
+        collection_updated, wiki_updated, state_updated,
     )
 
     print("\nProvisioning complete.", flush=True)
