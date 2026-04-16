@@ -201,7 +201,7 @@ The audit script (code in `prompts/synapse_workflow.md`):
   - `pmid`/`doi` missing but known → set from project metadata
   - Data manager team permissions (`synapse.team_id` from config) missing → grant
   - Dataset `items` empty → re-link from files folder
-  - Dataset `columnIds` missing → create columns
+  - Dataset `columnIds` missing or wrong order → create/rebuild with `id` and `name` as first two columns, then annotation columns alphabetically
   - Dataset entity annotations missing → set defaults
   - `fileFormat` with compression suffix (`.gz`) → strip to bare extension
   - `resourceType` missing → `experimentalData`
@@ -209,6 +209,10 @@ The audit script (code in `prompts/synapse_workflow.md`):
   - `dataSubtype` missing → infer from file extension (`raw` for fastq/bam/vcf, `processed` otherwise)
   - `specimenID`/`individualID` parseable from filename (GSM/SRR/ERR prefix) → set
   - Schema binding missing → bind the schema
+  - `resourceStatus` or `filename` annotations on File entities → remove
+  - Source Metadata/ folder is empty → flag for Phase 2 population
+  - Dataset name is non-descriptive (just an accession code) → flag for Phase 2 rename
+  - Any File entity has zero annotations → flag as HIGH PRIORITY for Phase 2 full annotation pass
 - **Collects context** for issues that require reasoning (annotation fields that need domain knowledge)
 - Prints a structured report and writes `{WORKSPACE_DIR}/audit_results.json`
 

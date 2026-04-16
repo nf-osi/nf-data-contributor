@@ -161,8 +161,8 @@ import json
 HIGH_CARDINALITY = {'specimenID', 'individualID', 'externalAccessionID', 'name', 'id',
                     'sampleId', 'runAccession', 'biosampleId'}
 
-# NOTE: resourceStatus is intentionally EXCLUDED — it is a project-level annotation,
-# never a per-file annotation. Never add it to Dataset column definitions.
+# NOTE: resourceStatus and filename are intentionally EXCLUDED — resourceStatus belongs
+# only on Project and Dataset entities; filename creates a duplicate of the system name column.
 EXCLUDE_COLS = {'resourceStatus', 'filename'}
 
 # Collect all unique annotation keys from the files in this dataset
@@ -173,9 +173,28 @@ for file_id in file_entity_ids:
         if key not in all_annotations:
             all_annotations[key] = val_obj
 
-col_ids = []
+# ── System columns (id, name) must ALWAYS be the first two columns ──────────
+# Check if they already exist in the current entity's columnIds; create if absent.
+ds_body = syn.restGET(f'/entity/{dataset_id}')
+sys_col_map = {}  # col name -> col id
+for cid in ds_body.get('columnIds', []):
+    try:
+        col_def = syn.restGET(f'/column/{cid}')
+        if col_def.get('name') in ('id', 'name'):
+            sys_col_map[col_def['name']] = cid
+    except Exception:
+        pass
+if 'id' not in sys_col_map:
+    c = syn.restPOST('/column', json.dumps({'name': 'id', 'columnType': 'ENTITYID'}))
+    sys_col_map['id'] = c['id']
+if 'name' not in sys_col_map:
+    c = syn.restPOST('/column', json.dumps({'name': 'name', 'columnType': 'STRING', 'maximumSize': 256}))
+    sys_col_map['name'] = c['id']
+
+# ── Annotation columns (alphabetical, after system cols) ────────────────────
+annotation_col_ids = []
 for col_name in sorted(all_annotations):
-    if col_name in EXCLUDE_COLS:
+    if col_name in EXCLUDE_COLS or col_name in ('id', 'name'):
         continue
     val_obj = all_annotations[col_name]
     ann_type = val_obj.get('type', 'STRING')
@@ -191,7 +210,10 @@ for col_name in sorted(all_annotations):
         if col_name not in HIGH_CARDINALITY:
             body['facetType'] = 'enumeration'
     col = syn.restPOST('/column', json.dumps(body))
-    col_ids.append(col['id'])
+    annotation_col_ids.append(col['id'])
+
+# Final order: id → name → annotation columns (alphabetical)
+col_ids = [sys_col_map['id'], sys_col_map['name']] + annotation_col_ids
 
 ds_body = syn.restGET(f'/entity/{dataset_id}')
 ds_body['columnIds'] = col_ids
@@ -872,7 +894,7 @@ def make_wiki_content(pub_title, disease_focus, assay_types, species, tissue_typ
 
 ---
 
-*This project was ingested automatically by @nadia-bot on {today} and is pending data manager review.*
+*This project was auto-curated by [NADIA](https://github.com/nf-osi/nadia) on {today} and is pending data manager review.*
 """
 ```
 
@@ -1372,6 +1394,26 @@ for proj in created:
         result['warnings'].append('Wiki missing — flagged for creation in Phase 2')
         print(f"  Wiki: MISSING")
 
+    # ── 3b. Source Metadata folder — must not be empty ─────────────
+    try:
+        sm_folder = next(
+            (c for c in syn.getChildren(project_id, includeTypes=['folder'])
+             if c['name'] == 'Source Metadata'),
+            None
+        )
+        if sm_folder:
+            sm_contents = list(syn.getChildren(sm_folder['id']))
+            if not sm_contents:
+                result['reasoning_gaps'].append({'scope': 'project', 'field': 'source_metadata_empty'})
+                result['warnings'].append('Source Metadata/ folder is empty — populate or remove it')
+                print(f"  Source Metadata: EMPTY — flagged for Phase 2")
+            else:
+                print(f"  Source Metadata: OK ({len(sm_contents)} files)")
+        else:
+            print(f"  Source Metadata: folder not found (may have been removed or not created)")
+    except Exception as e:
+        result['warnings'].append(f'Source Metadata check failed: {e}')
+
     # ── 4. Per-dataset audit ───────────────────────────────────────
     for ds in datasets:
         acc             = ds.get('accession_id', '')
@@ -1466,6 +1508,12 @@ for proj in created:
                 # needsExtraction still set?
                 if ann_dict.get('needsExtraction'):
                     file_gap['gaps'].append('needsExtraction still set — zip not yet extracted')
+
+                # Zero-annotation check — file has no annotations at all
+                # (auto-fixes above may have deleted some; check original ann_dict)
+                schema_fields = [k for k in ann_dict if k not in ('resourceStatus', 'filename')]
+                if not schema_fields:
+                    file_gap['gaps'].append('FILE HAS NO ANNOTATIONS — requires full annotation pass in Phase 2')
 
                 # Reasoning-required fields
                 for field in REASONING_FILE_FIELDS:
@@ -1567,9 +1615,38 @@ for proj in created:
                     except Exception:
                         pass
 
-                if expected_col_names != existing_col_names:
-                    new_col_ids = []
+                # Check column ordering too: id and name must be first two
+                existing_ordered = []
+                for cid in existing_col_ids:
+                    try:
+                        existing_ordered.append(syn.restGET(f'/column/{cid}')['name'])
+                    except Exception:
+                        pass
+                id_name_first = (len(existing_ordered) >= 2
+                                 and existing_ordered[0] == 'id'
+                                 and existing_ordered[1] == 'name')
+
+                if expected_col_names != existing_col_names or not id_name_first:
+                    # Get or create system columns (id, name)
+                    sys_col_map_audit = {}
+                    for cid in existing_col_ids:
+                        try:
+                            col_def = syn.restGET(f'/column/{cid}')
+                            if col_def.get('name') in ('id', 'name'):
+                                sys_col_map_audit[col_def['name']] = cid
+                        except Exception:
+                            pass
+                    if 'id' not in sys_col_map_audit:
+                        c = syn.restPOST('/column', json.dumps({'name': 'id', 'columnType': 'ENTITYID'}))
+                        sys_col_map_audit['id'] = c['id']
+                    if 'name' not in sys_col_map_audit:
+                        c = syn.restPOST('/column', json.dumps({'name': 'name', 'columnType': 'STRING', 'maximumSize': 256}))
+                        sys_col_map_audit['name'] = c['id']
+
+                    annotation_col_ids_audit = []
                     for col_name in sorted(expected_col_names):
+                        if col_name in ('id', 'name'):
+                            continue
                         val_obj = all_ann_audit[col_name]
                         ann_type = val_obj.get('type', 'STRING')
                         if ann_type == 'DOUBLE':
@@ -1584,14 +1661,34 @@ for proj in created:
                             if col_name not in HIGH_CARDINALITY_AUDIT:
                                 body['facetType'] = 'enumeration'
                         col = syn.restPOST('/column', json.dumps(body))
-                        new_col_ids.append(col['id'])
+                        annotation_col_ids_audit.append(col['id'])
+
+                    # Final order: id → name → annotation columns
+                    new_col_ids = ([sys_col_map_audit['id'], sys_col_map_audit['name']]
+                                   + annotation_col_ids_audit)
                     ds_body2 = syn.restGET(f'/entity/{dataset_id}')
                     ds_body2['columnIds'] = new_col_ids
                     syn.restPUT(f'/entity/{dataset_id}', json.dumps(ds_body2))
-                    result['fixes_applied'].append(f'{acc}: Dataset columnIds rebuilt from file annotations')
-                    print(f"    Dataset columnIds: FIXED — rebuilt from {len(new_col_ids)} file annotation keys")
+                    result['fixes_applied'].append(f'{acc}: Dataset columnIds rebuilt (id, name first, then annotations)')
+                    print(f"    Dataset columnIds: FIXED — id+name first, then {len(annotation_col_ids_audit)} annotation cols")
                 else:
-                    print(f"    Dataset columnIds: OK ({len(existing_col_ids)} columns)")
+                    print(f"    Dataset columnIds: OK ({len(existing_col_ids)} columns, id+name first)")
+
+                # Dataset name — must be descriptive (not just repo_accession)
+                ds_name = ds_body.get('name', '')
+                # Flag if name looks like just an accession or a generic label
+                import re as _re
+                if _re.match(r'^(GEO|SRA|ENA|PRIDE|Zenodo|Figshare|OSF)?_?[A-Z]{2,5}\d{4,10}$', ds_name) or \
+                   ds_name.lower() in ('data', 'dataset', 'rna-seq', 'atac-seq', 'chip-seq'):
+                    result['reasoning_gaps'].append({
+                        'scope': 'dataset', 'accession_id': acc,
+                        'field': 'dataset_name',
+                        'current': ds_name,
+                        'note': 'Dataset name is not descriptive — should be: assay + biological context + (repo accession)',
+                    })
+                    print(f"    Dataset name: NON-DESCRIPTIVE ('{ds_name}') — flagged for Phase 2")
+                else:
+                    print(f"    Dataset name: OK ('{ds_name[:60]}')")
 
                 # Dataset annotations
                 ds_ann = syn.restGET(f'/entity/{dataset_id}/annotations2')

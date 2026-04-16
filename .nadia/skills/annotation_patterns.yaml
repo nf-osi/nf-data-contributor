@@ -126,3 +126,116 @@ patterns:
     source: fix
     issues: []
     added: "2026-04-16"
+
+  - pattern: "NF1 diagnosis scoping — somatic vs germline"
+    rule: >
+      Set disease annotations to NF1 ONLY when the biospecimens come from
+      a person (or model organism) with germline NF1 mutation. Somatic loss of
+      NF1 in a cancer cell line or tumor (e.g., NF1-depleted breast cancer cell
+      line, TCGA tumor with NF1 somatic mutation) does NOT qualify — those
+      samples are from the general cancer population, not NF1 patients.
+      To determine this: read the paper's patient/model description carefully.
+      Look for "NF1 patients", "neurofibromatosis type 1", "germline NF1", or
+      "NF1+/-" genotype (heterozygous model) vs "NF1 knockout in X cell line".
+      If uncertain, use a more specific cancer type annotation and flag for
+      human review. Do not default to NF1 when the connection is only somatic.
+    source: fix
+    issues: [177, 244]
+    added: "2026-04-16"
+
+  - pattern: "studyLeads format: Firstname Lastname"
+    rule: >
+      The studyLeads field must use "Firstname Middlename/Initial Lastname"
+      format — never "Lastname, Firstname" or "Lastname,F". PubMed AuthorList
+      XML returns names as LastName + ForeName; always reformat as
+      f"{fore_name} {last_name}". For middle initials, use the format
+      "Sara Ortega-Bertran" not "Ortega-Bertran, Sara" or "S Ortega-Bertran".
+    source: fix
+    issues: [9, 223]
+    added: "2026-04-16"
+
+  - pattern: "Dataset columns: id and name must be first"
+    rule: >
+      The first two columns of every Dataset entity must be the system columns
+      `id` (ENTITYID type) and `name` (STRING type). When building columnIds:
+      check the existing Dataset entity's columnIds for id and name column IDs
+      first; create them if absent (POST /column with columnType ENTITYID and
+      STRING respectively). Then add alphabetically sorted annotation columns.
+      Final order: [id_col_id, name_col_id] + sorted_annotation_col_ids.
+      The audit must also enforce this ordering when rebuilding columnIds.
+    source: fix
+    issues: [10, 11, 220, 223]
+    added: "2026-04-16"
+
+  - pattern: "Source Metadata folder must be populated"
+    rule: >
+      Every agent-created project has a Source Metadata/ folder. Do not leave
+      it empty — either populate it with the original repository metadata files
+      (GEO series matrix, ENA filereport TSV, Zenodo metadata JSON, etc.) or
+      remove the folder entirely. An empty Source Metadata/ folder is confusing
+      for data managers and fails the completion checklist. The audit must flag
+      empty Source Metadata/ folders. See synapse_workflow.md for what to store.
+    source: fix
+    issues: [177, 220, 223, 186]
+    added: "2026-04-16"
+
+  - pattern: "Dataset names must be descriptive"
+    rule: >
+      Dataset entity names must be human-readable and informative — not just
+      the repository accession. A good name communicates assay type, biological
+      context, and (optionally) accession. Examples:
+        GOOD: "GSE265782 RNA-seq — NF1+/- mouse sciatic nerve (bulk)"
+        GOOD: "PXD012345 Proteomics — Schwannoma patient biopsies"
+        BAD:  "GEO_GSE265782"
+        BAD:  "RNA-seq dataset"
+      The name should allow a data manager to distinguish datasets within a
+      multi-dataset project without clicking into each one.
+    source: fix
+    issues: [11, 216, 220]
+    added: "2026-04-16"
+
+  - pattern: "Reject re-analysis, summary-only, and stub datasets"
+    rule: >
+      Do not create Synapse projects for:
+      1. Re-analysis studies — papers that reprocess existing public GEO/SRA
+         data without depositing new primary data. These add no new computable
+         data; instead, check if the original deposited data is already indexed.
+      2. Summary-only datasets — repositories containing only summary statistics
+         (aggregate counts, p-values, coefficient tables) without raw or
+         processed primary data. These cannot be meaningfully mined.
+      3. Stub datasets — repositories where the data is described but no actual
+         files are deposited yet (OSF with zero files, embargoed datasets with
+         no accessible files, placeholder records).
+      Detection signals: paper says "we downloaded data from GEO/TCGA",
+      repository has 0 files or only .txt summary tables, access_type=embargoed.
+    source: fix
+    issues: [194, 235, 233, 246]
+    added: "2026-04-16"
+
+  - pattern: "GEO TAR archive must be inspected for additional file types"
+    rule: >
+      GEO series often deposit additional file types (IDAT, BED, bigWig, etc.)
+      inside a supplementary TAR archive (e.g., GSE123456_RAW.tar). Do NOT
+      declare a file type absent without checking the TAR contents. Call the
+      GEO FTP listing for the accession (ftp://ftp.ncbi.nlm.nih.gov/geo/series/...)
+      and list all supplementary files. If a *_RAW.tar or similar archive is
+      present, note its likely contents (based on the assay type) and flag in
+      the curation comment that the archive may contain additional file types
+      requiring extraction.
+    source: fix
+    issues: [220, 223]
+    added: "2026-04-16"
+
+  - pattern: "Wiki must include Auto-curated attribution and disclaimer"
+    rule: >
+      The wiki footer line must read:
+        *This project was auto-curated by [NADIA](https://github.com/nf-osi/nadia)
+        on {today} and is pending data manager review.*
+      Use "auto-curated by NADIA" (not "ingested automatically by @nadia-bot").
+      The wiki must also include a disclaimer section if one is expected by the
+      portal's wiki template standards (check with data managers if uncertain).
+      The wiki title must be the full publication title — never "Auto-Discovered"
+      or generic placeholders.
+    source: fix+confirmed
+    issues: [216]
+    added: "2026-04-16"

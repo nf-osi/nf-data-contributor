@@ -496,6 +496,12 @@ with open(f'{WORKSPACE_DIR}/scored.json', 'w') as f:
 
 **Thresholds:** minimum score 0.70, must be primary data, minimum 3 samples (if known), access must be `open` or `controlled` (skip `embargoed`).
 
+**Reject these regardless of relevance score:**
+- **Re-analysis studies** — the paper reprocesses existing public GEO/SRA/TCGA data without depositing new primary data. Signal: paper says "we downloaded from GEO/TCGA", no new repository accession for this paper. Action: skip; separately check if the original data is already indexed.
+- **Summary-only datasets** — repository contains only aggregate statistics (p-value tables, coefficient files, summary TSVs) with no raw or processed primary data files. Signal: all files are `.txt` summary tables; no FASTQ/BAM/count matrix/raw data.
+- **Stub/empty repositories** — repository record exists but no data files are deposited yet. Signal: OSF with 0 files, Zenodo draft not published, embargoed with no accessible files.
+- **Out-of-scope disease context** — the paper's connection to the target disease is only through somatic mutation in a general cancer cohort, with no germline disease connection. Treat this carefully — see Standard 13 for specific guidance on disease annotation.
+
 ---
 
 ## Synapse Project Structure
@@ -604,6 +610,8 @@ Identify which schema field captures this concept by calling `fetch_schema_prope
 
 Repository submitter fields (ENA, ArrayExpress, PRIDE, etc.) reflect whoever deposited the files — often a research engineer or postdoc — not the principal investigator or corresponding author. When a schema has a field for study investigators, study leads, or principal investigators, derive it from the PubMed AuthorList (first + last/corresponding author), not the repository submitter. If no PMID is available, check BioStudies for an explicit `principal investigator` role. Only fall back to the repository submitter if no other source exists, and flag it for human review.
 
+**Name format:** always write author names as `Firstname [Middle] Lastname` — never `Lastname, Firstname` or `Lastname,F`. PubMed XML returns `<LastName>` and `<ForeName>` separately; combine as `f"{fore_name} {last_name}"`. GEO contributor fields may use `Lastname SP` style — reformat these before storing.
+
 ### 4 — Organism/species fields: always read from source metadata, never infer
 
 Any disease can appear across multiple species (human patient samples, mouse models, zebrafish, Drosophila, cell lines, etc.). When a schema defines an organism or taxon field, always read it from the repository's organism/taxon attribute — not from the disease context, model name, or study description. GEO `!Series_sample_taxid`, ENA `scientific_name`, and BioStudies `Organism` are authoritative. If the repository lists multiple species (e.g., human xenograft in mouse), include all distinct values.
@@ -675,6 +683,20 @@ Before binding a metadata schema to a files folder, verify the assay type of the
 Applying the wrong template (e.g., an RNA-seq schema to chromatin accessibility data, or an epigenomics schema to transcriptomics data) causes the wrong validation rules to apply and may result in required fields being missed or inapplicable fields being populated. Each dataset in a multi-assay project may require a different template.
 
 **For model system studies** (cell lines, animal models, organoids): call `fetch_schema_properties(schema_uri)` and populate every field that captures the model system identity (typically: system/strain name, species, sex, age, age unit, and any study-specific genotype or condition fields). These fields vary per sample for experiments with multiple cell lines or genetic backgrounds and must be populated per-file, not at study level.
+
+### 13 — Disease annotation scoping: germline vs. somatic
+
+When setting disease-focus or diagnosis annotations, distinguish between germline disease (the patient or organism genetically carries the disease) and somatic mutation in a disease-naive background:
+
+- **Germline disease** — patient has the disease by diagnosis, or the model organism carries a germline mutation (e.g., `Nf1+/-` mouse model, NF1 patient biopsy, NF2 patient tumor). → Use the disease annotation (e.g., NF1, NF2, schwannomatosis).
+- **Somatic mutation only** — cancer cell line with an acquired somatic NF1/NF2 loss, TCGA tumor that happens to carry an NF1 mutation, or general cancer cohort where NF1 loss is one of many driver events. → Use the appropriate cancer type annotation; **do not** add the germline disease annotation.
+
+**Determining which applies:**
+1. Check whether the study explicitly recruits NF patients or uses NF patient specimens.
+2. Check model organism genotype: `Nf1+/-` (heterozygous germline) = germline model; `NF1 siRNA knockdown in MCF-7` = somatic model.
+3. When uncertain, use the specific tumor/cancer type annotation and flag for human review.
+
+This distinction matters because portal data consumers use disease annotations to find data relevant to patients with inherited conditions — mixing in somatic cancer data produces misleading search results.
 
 ---
 
