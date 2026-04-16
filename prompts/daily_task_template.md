@@ -212,33 +212,39 @@ The audit script (code in `prompts/synapse_workflow.md`):
 
 ### 7b — Agent reasoning (Phase 2)
 
+**Read `prompts/annotation_gap_fill.md` for the complete source-exhaustion algorithm.** This phase runs the full gap-fill strategy against every remaining missing field, working through all available upstream sources before declaring a field unresolvable.
+
 After running `audit.py`, read `{WORKSPACE_DIR}/audit_results.json`. For each project with `reasoning_gaps`:
 
-1. Read the available context: abstract (stored in audit_results), project annotations, wiki
-2. If PMID is known and abstract is missing, fetch it from PubMed
-3. **Schema completeness check (Standard 11)** — For each project, call `fetch_schema_properties(schema_uri)` on the bound schema (read the URI from `audit_results.json` → `schema_uri`, or re-fetch from `/entity/{files_folder_id}/schema/binding`). Compare every schema property against the annotations currently on each file. Build a list of missing properties per file.
+1. Read the available context: abstract (stored in audit_results), project annotations, wiki. Fetch the abstract from PubMed if missing.
 
-4. **Sample-varying field check (Standard 5)** — For each schema field in the missing list (and for any field that has the same value on all files), check whether the study has multiple experimental groups or sample types. If it does:
-   - Map each file to its source sample by fetching the repository run table (SRA runinfo, ENA filereport, GEO GSM table)
-   - For each distinct sample, fetch its individual metadata record (GEO GSM characteristics, SRA BioSample attributes, ENA sample)
-   - Re-populate any field that varies per sample with the per-sample value
-   - Do NOT carry over study-level values for fields that should vary (genotype, condition, sex, age, tissue, cell type, treatment, etc.)
+2. **Schema completeness check (Standard 11)** — Call `fetch_schema_properties(schema_uri)` on the bound schema. Compare every schema property against the annotations currently on each file. Build the gap list: `missing = set(schema_props) - set(current_file_annotations) - never_set - empty_enum`.
 
-5. Reason through remaining gaps using the Annotation Quality Standards from CLAUDE.md:
-   - Disease/topic focus fields → infer from disease mentions in title + abstract
-   - Data type category field → infer from assay type
-   - Investigator/study lead fields → **always fetch from PubMed AuthorList** (first + last/corresponding author); do NOT use ENA/repository submitter fields — submitters are often research engineers, not PIs
-   - Institution/affiliation fields → from author affiliations in PubMed record or abstract
-   - External accession list → reconstruct from accession_id + REPO_TO_PREFIX; check GEO `!Series_relation` for linked SRA/BioProject accessions and include them all
-   - Assay-type fields → verify from repository library metadata (ENA `library_source`/`library_strategy`, GEO sample characteristics) before setting; do not infer from publication title
-   - Organism/taxon fields → **always verify from repository organism/taxon field** (ENA `scientific_name`, GEO `!Series_sample_taxid`); never infer from disease context
-   - Biological/tissue/phenotype fields → infer from abstract + experimental description; use schema enum values only
-   - Instrument/technology fields → **fetch the exact model from repository source**: ENA `instrument_model` column, GEO `!Series_instrument_model` — do not use generic vendor names
-   - Library preparation/method fields → look for kit/method names in abstract, GEO protocol fields, ENA `library_selection`
-   - Library type fields (strand, run type, nucleic acid source) → ENA `library_layout`, `library_source`, `library_strand`; these are in the ENA filereport and should be considered mechanical fields
-   - `wiki` missing → create from wiki template (in `prompts/synapse_workflow.md`) using available metadata
-6. For any required field where no valid enum value exists: use the closest available enum value and record the gap
-7. Write `{WORKSPACE_DIR}/audit_reasoning_fixes.json` with all resolved values, including `curation_notes` per project listing approximations and items for human review. The `curation_notes` must include a `missing_schema_fields` section listing every property that could not be populated and why.
+3. **Run the gap-fill algorithm from `prompts/annotation_gap_fill.md`** against all missing fields AND against any field that was set in Step 6 without a direct structured-column source. Fields set in `synapse_actions.py` via reasoning (not a column read) are candidates for re-evaluation:
+   - Read what value was set and how it was derived
+   - If the value came from interpreting a protocol string, kit name, or biological context — re-derive it through the Tier 1→4 source hierarchy to verify
+   - If the re-derived value differs, correct it and document the correction in the gap report
+   - If the re-derived value matches, document the source confirmation
+
+   - **Tier 1 — Structured repository metadata:** Re-fetch the ENA filereport with ALL columns (`fetch_ena_filereport_full`), BioSample XML attributes, ENA sample XML, GEO GSM characteristics. These are per-sample and yield technical fields (instrument, library prep, read depth, read length, strand, run type) as well as biological fields (sex, age, tissue, genotype, cell type).
+
+   - **Tier 2 — Publication metadata:** Fetch PMC full text methods section (`fetch_pmc_methods`), CrossRef funder info. Download and parse supplementary tables (`fetch_geo_supplementary_files`, `try_download_and_parse_table`) — these are the single richest source of per-sample demographic and phenotypic data. Look for patient/sample manifests with columns for sex, age, diagnosis, genotype, treatment, anatomic location.
+
+   - **Tier 3 — Text extraction via reasoning:** Read the abstract, methods section text, and supplementary table rows. Use reasoning to extract unambiguous values. Apply only values that are explicit in the text — do not infer. Validate all extracted values against schema enums using `validate_against_enum()` from `prompts/annotation_gap_fill.md`.
+
+   - **Tier 4 — Data file inspection (last resort):** If a field genuinely cannot be found in any metadata source, inspect the actual data files: h5ad/loom `obs` columns for per-cell metadata, BAM `@RG` tags for sample/library info, FASTQ headers for instrument info, count matrix column headers for sample IDs. Use HTTP Range requests to avoid downloading full files.
+
+4. **Sample-varying field check (Standard 5)** — For any field that should vary per sample (genotype, condition, sex, age, tissue, cell type, treatment), verify the per-file values are distinct where the study design requires it. If all files have the same value for a field that should vary, re-derive per-file values from the per-sample metadata fetched in Tier 1–2.
+
+5. For non-file annotation gaps:
+   - Investigator/study lead fields → **always from PubMed AuthorList** (first + last/corresponding author); never from ENA/repository submitter
+   - Institution/affiliation fields → from PubMed author affiliations
+   - External accession list → check GEO `!Series_relation` for linked SRA/BioProject accessions and add all
+   - `wiki` missing → create from wiki template in `prompts/synapse_workflow.md`
+
+6. For any field where no valid enum value exists: use the closest available enum value and record the gap explicitly.
+
+7. Write `{WORKSPACE_DIR}/audit_reasoning_fixes.json` with all resolved values. Include a `gap_fill_report` per project (format defined in `prompts/annotation_gap_fill.md`) listing: which fields were filled at each tier, which values were found but failed enum validation (include the raw value), and which fields remain unfilled with the reason. This becomes the GitHub curation comment.
 
 ### 7c — Write and run `{WORKSPACE_DIR}/apply_audit_fixes.py` (Phase 3)
 

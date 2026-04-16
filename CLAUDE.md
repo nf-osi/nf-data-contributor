@@ -575,6 +575,8 @@ When populating schema fields, the Annotation Quality Standards apply (see secti
 > - The resource/review status field — belongs only on the **Project** and **Dataset entity**. Setting it on files creates a spurious column in the Datasets tab.
 > - A custom filename annotation — the Synapse system `name` property is the filename column in Dataset views. Adding it as a custom annotation creates a duplicate column.
 
+Any schema field that captures where files are physically hosted must reflect the **actual file host**, not the study discovery path. If files are stored in ENA/SRA and the study was discovered via a GEO link, the hosting repository field must say 'ENA' or 'SRA' — GEO is a study metadata portal, not a file host for SRA-deposited data.
+
 ---
 
 ## Annotation Quality Standards
@@ -584,6 +586,10 @@ These rules apply to every project, regardless of domain. They describe *princip
 ### 1 — Schema enums are ground truth. Fetch them first.
 
 Before writing any annotation, call `fetch_schema_properties(schema_uri)` to retrieve every field the schema defines, along with its enum constraints. Never use hardcoded field names or assume enum values from memory. If a source value is not in the enum, do not invent a mapping — use the closest valid enum value and flag it for human review in the GitHub curation comment.
+
+**If a field's enum list is empty (`"enum": []`), do not set that field at all — an empty enum means no valid value exists for it in the current schema version.** Setting a field with no valid enum values will always fail validation.
+
+**Config-provided vocabulary lists can lag the live portal.** For any controlled-vocabulary annotation (disease manifestation, disease focus, data type, etc.), verify current valid values by querying the live Synapse portal table at runtime rather than relying solely on values from `config/settings.yaml`. The portal table is authoritative; config values are a convenience cache that may be stale.
 
 ### 2 — Instrument/technology fields: use exact values from the source repository
 
@@ -611,7 +617,9 @@ For every file:
 2. Fetch that sample's individual metadata record (GEO GSM characteristics, SRA BioSample attributes, ENA sample record)
 3. Populate each schema field from that sample's specific values, not from the study-level summary
 
-For identifier fields (specimen ID, sample ID, individual ID, biobank ID, or similar): the value must be unique per file — not a single shared value copied to all files. Parse from filename prefixes (run accessions like SRR, ERR, GSM are reliable) or from the SRA run table / GEO GSM list.
+For identifier fields (specimen ID, sample ID, individual ID, biobank ID, or similar): the value must be unique per file — not a single shared value copied to all files. Parse from the SRA run table / GEO GSM list, or from structured repository metadata.
+
+**Run accessions (SRR, ERR, DRR) identify sequencing runs, not biological individuals or specimens.** Do not use run accessions as the value for individual ID or specimen ID fields. Use the biological identifier from the run's metadata instead — typically `sample_title`, `sample_alias`, or BioSample accession (SAMN/SAME/SAMD) from the ENA filereport, or the GSM identifier from GEO. For studies with a clear patient/sample nomenclature (e.g., patient IDs from supplementary tables), use those.
 
 **Signal that this rule was violated:** all files in the project have the same value for a field that represents a biological property of a sample (genotype, condition, sex, etc.) despite the study having multiple experimental groups.
 
@@ -647,19 +655,26 @@ After completing annotations for each project, post a GitHub comment on the stud
 
 This comment is the handoff from autonomous annotation to human review. Without it, data managers cannot evaluate the quality of the curation or identify what needs correction.
 
-### 11 — Schema completeness check: compare every schema property against what was set
+### 11 — Schema completeness check: exhaust all upstream sources before declaring a field unresolvable
 
-After annotating files, run an explicit completeness check against the bound schema before considering annotation done:
+After annotating files, run the full gap-fill algorithm from `prompts/annotation_gap_fill.md` before considering annotation done. The algorithm works through four tiers of sources in priority order — stopping at the first tier that yields a valid value for each missing field:
 
-1. Call `fetch_schema_properties(schema_uri)` to get every property the schema defines
-2. For each file, compare its current annotations against that full property list
-3. For each missing property, attempt to fill it from the file's per-sample source metadata (see Standard 5):
-   - Fetch the sample record for this specific file's run/sample accession
-   - Check whether the missing field has a value in that sample's attributes
-   - Apply only valid enum values; flag anything not in the enum per Standard 9
-4. For fields that genuinely cannot be determined from any available source, explicitly document them as unresolvable in the GitHub curation comment — do not silently leave them blank
+- **Tier 1** — Structured repository metadata (ENA filereport with all columns, BioSample XML, ENA sample XML, GEO GSM characteristics, SRA RunInfo)
+- **Tier 2** — Publication metadata (PMC full text methods section, supplementary tables downloaded and parsed, CrossRef funder info)
+- **Tier 3** — Text extraction via reasoning (abstract, methods section, supplementary table rows — extract unambiguous values only)
+- **Tier 4** — Data file inspection (h5ad/loom obs columns, BAM @RG tags, FASTQ headers, count matrix column headers)
 
-This check must happen before the Dataset entity `items` are finalized, so that annotation completeness is reflected in the Dataset view from the start. The check also catches the case where the same incorrect study-level value was copied to all files for a field that should vary per sample (Standard 5 violation).
+Only after working through all four tiers should a field be documented as unresolvable. For fields that genuinely cannot be determined from any source, explicitly document them in the GitHub curation comment with the reason.
+
+This check must happen before the Dataset entity `items` are finalized. It also catches Standard 5 violations: if any field that should vary per sample (genotype, condition, sex, age, tissue, cell type) has the same value on all files in a multi-sample study, re-derive per-file values from per-sample metadata.
+
+### 12 — Schema template must match the actual data modality of the files
+
+Before binding a metadata schema to a files folder, verify the assay type of the files from repository library metadata (ENA `library_strategy`, GEO `!Series_library_strategy`, repository experiment descriptions) — not from the paper title or disease context. Bind the template that matches the primary data modality of the files in that specific dataset.
+
+Applying the wrong template (e.g., an RNA-seq schema to chromatin accessibility data, or an epigenomics schema to transcriptomics data) causes the wrong validation rules to apply and may result in required fields being missed or inapplicable fields being populated. Each dataset in a multi-assay project may require a different template.
+
+**For model system studies** (cell lines, animal models, organoids): call `fetch_schema_properties(schema_uri)` and populate every field that captures the model system identity (typically: system/strain name, species, sex, age, age unit, and any study-specific genotype or condition fields). These fields vary per sample for experiments with multiple cell lines or genetic backgrounds and must be populated per-file, not at study level.
 
 ---
 

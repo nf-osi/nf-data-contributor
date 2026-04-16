@@ -254,7 +254,7 @@ resp = httpx.get(metadata_dict_url, timeout=15)
 available_templates = [f['name'].replace('.json', '') for f in resp.json() if f['name'].endswith('.json')]
 ```
 
-2. Pick the best-matching template through reasoning (read the names, understand the dataset, select).
+2. Pick the best-matching template through reasoning (read the names, understand the dataset, select). **The template must match the primary data modality of the files being bound — not the paper title or disease context.** Verify the assay type from repository library metadata (ENA `library_strategy`, GEO `!Series_library_strategy`) before selecting. A multi-assay project (e.g., RNA-seq + ATAC-seq datasets in the same project) requires a different template for each files folder. Binding the wrong template (e.g., an RNA-seq template to chromatin accessibility files) applies incorrect validation rules and will miss required fields.
 
 3. Convert to schema URI: lowercase and prepend the configured URI prefix:
 ```python
@@ -505,73 +505,45 @@ def fetch_pubmed_full(pmid: str) -> dict:
     }
 ```
 
-### Step C — Reason through ALL schema properties and normalize
+### Step C — Populate ALL schema properties via gap-fill
 
-**Do not hardcode field names.** Use `schema_props` from Step A2 as the authoritative list. For EVERY field the schema defines, check whether source data contains a value, then reason about the best match.
+**Read `prompts/annotation_gap_fill.md` for the complete algorithm.** This step runs the full gap-fill strategy — not just the primary source, but every available upstream source — before applying any annotations to File entities.
 
-The process (in agent reasoning, not Python):
-1. Read `schema_props` to get the full list of available fields
-2. Read `raw_metadata` to see what was extracted from source
-3. For each schema property:
-   - Does source data contain something mappable to this field?
-   - If the field has an enum: does the raw value match any enum entry (exact or near-match)?
-   - If no match: leave unset (do NOT invent values)
-4. Write only the fields you can confidently populate
-
-Common source → schema field mappings (illustrative, not exhaustive — always call `fetch_schema_properties(schema_uri)` to get the actual field list for the selected schema):
-
-| Source data key | Typical schema field | Notes |
-|-----------------|---------------------|-------|
-| organism / scientific_name | `species` | enum — match to binomial |
-| tissue / source | `organ` | enum — match best available |
-| sex / gender | `sex` | enum — male/female/unknown |
-| age / age_at_diagnosis | `age` + `ageUnit` | numeric + enum unit |
-| cell_type / cell line | `isCellLine`, `isPrimaryCell` | bool enums if present in schema |
-| genotype fields | check `schema_props` for genotype keys | enum if constrained; freetext otherwise |
-| model organism strain / line | check `schema_props` for system/strain name key | freetext |
-| model organism species | check `schema_props` for model species key | enum if present |
-| model age / sex | check `schema_props` for model age/sex keys | enum or numeric + unit |
-| treatment / drug / compound | `experimentalCondition` or compound fields | freetext or enum |
-| perturbed gene / knockdown | check `schema_props` for perturbation keys | |
-| library_strategy / assay | `assay` | enum — RNA-seq, WGS, etc. |
-| instrument_model | `platform` | enum |
-| library_selection / library_prep | `libraryPreparationMethod` | enum |
-| library_layout (PAIRED/SINGLE) | `runType` | enum |
-| strandedness | `libraryStrand` | enum |
-| read_length | `readLength` | integer |
-| read_count / base_count | `readDepth` | integer |
-| nucleic_acid_source (total RNA, polyA, etc.) | `nucleicAcidSource` | enum |
-| sample_alias / run_accession | `specimenID`, `individualID` | per-file |
-| batch / lane | `batchID` | freetext |
-| tissue_preparation / extraction | `specimenPreparationMethod` | enum |
-| specimen type (tumor/normal/cell line) | `specimenType` | enum |
-| diagnosis / disease | `diagnosis` | enum |
-| tumor type | `tumorType` | enum |
-| data processing level | `dataSubtype` | raw/processed/normalized |
-
-Write the result to `{WORKSPACE_DIR}/normalized_annotations.json` — keyed only by fields present in `schema_props`:
+The process:
+1. Start with `schema_props = fetch_schema_properties(schema_uri)` and `raw_metadata` from Step B
+2. Classify each schema field into a category (technical/library, biological/sample, study-level, identifier, model system) — see Field Categories in `prompts/annotation_gap_fill.md`
+3. For each field, work through the source priority list for its category (Tier 1 → Tier 2 → Tier 3 → Tier 4) until a valid value is found
+4. Validate every extracted value against the field's enum constraint before accepting it
+5. Build `per_file_annotations` (fields that vary per file) and `study_level_annotations` (fields uniform across all files)
+6. Merge into `normalized_annotations` keyed only by fields present in `schema_props`
+7. Record what tier each value came from in `normalized_annotations_sources.json`
 
 ```python
 import json
 
-# After reasoning through each field:
-normalized = {}
-# ... populate only fields confirmed in schema_props with values confirmed in raw_metadata ...
+# After running the gap-fill algorithm from prompts/annotation_gap_fill.md:
+# normalized = {field: value}  — only fields in schema_props, all enum-validated
+# per_file   = {run_accession: {field: value}}  — per-sample varying values
+# gap_report = {filled_tier1: [...], filled_tier2: [...], gap_not_in_source: [...], ...}
 
-with open('{WORKSPACE_DIR}/normalized_annotations.json', 'w') as f:
+with open(f'{WORKSPACE_DIR}/normalized_annotations.json', 'w') as f:
     json.dump(normalized, f, indent=2)
-print(f"  Normalized {len(normalized)} annotation fields")
-```
+with open(f'{WORKSPACE_DIR}/normalized_annotations_sources.json', 'w') as f:
+    json.dump({'study_level': normalized, 'per_file': per_file, 'gap_report': gap_report}, f, indent=2)
+print(f"  Normalized {len(normalized)} study-level + {len(per_file)} per-file annotation fields")
+print(f"  Gap fill: T1={len(gap_report['filled_tier1'])} T2={len(gap_report['filled_tier2'])} "
+      f"T3={len(gap_report['filled_tier3'])} T4={len(gap_report['filled_tier4'])} "
+      f"unfilled={len(gap_report['gap_not_in_source'])}")
 ```
 
 **Key constraints:**
 - **Never hardcode field names** — always derive available fields from `schema_props = fetch_schema_properties(schema_uri)` at runtime
-- Only set enum-constrained fields to values that appear in the schema's enum list
+- Only set enum-constrained fields to values that appear in the schema's enum list (use `validate_against_enum()` from `prompts/annotation_gap_fill.md`)
 - Populate as many schema fields as source data supports — more is better; omitting a field is fine, inventing one is not
-- `tumorType` is required on every file — derive from paper/abstract
-- `specimenID` is one per file — parse from filename prefix, never a multi-value list
-- `fileFormat` must match schema enum exactly — strip `.gz`/`.zip` (e.g. `fastq.gz` → `fastq`)
-- All controlled-vocabulary fields: use exact enum values from the schema — spacing and capitalization matter (e.g., a schema may require "Low-Grade Glioma NOS" not "Low Grade Glioma")
+- Per-sample identifier fields (fields whose description indicates specimen, individual, or sample identity) must have one unique value per file — never a list or a shared value across files
+- File format fields must strip compression suffixes before storing (e.g. `fastq.gz` → `fastq`, `txt.gz` → `txt`)
+- All controlled-vocabulary fields: use exact enum values from the schema — spacing and capitalization matter
+- Fields with empty enum (`"enum": []`): do not set — no valid value exists in the current schema version
 
 ### Step D — Apply annotations to File entities
 
@@ -599,7 +571,32 @@ for child in syn.getChildren(files_folder_id, includeTypes=['file']):
     syn.store(f)
 ```
 
-**Shared across all files** (values that are the same for every file in the dataset): call `fetch_schema_properties(schema_uri)` to get the full field list, then populate every field that has a value shared across the whole dataset (assay type, organism, disease/diagnosis, instrument model, library prep method, study link, external accession reference, data processing level, etc.). The schema is the authoritative source — do not consult a separate config list for file fields.
+**Shared across all files — two-tier annotation approach:**
+
+**Step D (here, in synapse_actions.py) sets only directly-readable structured fields.** These are values you can copy verbatim from a structured metadata column without any interpretation.
+
+**Set in Step D** — the schema field that captures each concept below ← from its source column:
+- Assay / data type ← ENA `library_strategy`, GEO `!Series_library_strategy`
+- Organism / species ← ENA `scientific_name`, GEO `!Series_sample_organism`
+- Sequencing instrument / platform ← ENA `instrument_model`, GEO `!Series_instrument_model`
+- Library layout / run type ← ENA `library_layout` (PAIRED / SINGLE — verify enum values match the schema)
+- Read depth / read count ← ENA `read_count` (per-file)
+- Read length ← ENA `nominal_length` (per-file, if available)
+- File format ← filename extension (strip .gz/.bz2/.zip)
+- Specimen or biological sample identifier ← ENA `sample_title` or `sample_alias`; GSM ID from GEO
+- External accession and repository identity ← from the known accession and hosting repository
+- Data subtype / processing level ← inferred from file extension (fastq/bam/vcf → raw; tsv/txt/h5/csv → processed)
+- Resource type ← the constant value for experimental data defined in the schema enum
+
+**The rule:** the field names above are illustrative. At runtime, call `fetch_schema_properties(schema_uri)` and use the field descriptions to identify which schema field captures each concept. Only set a field if its value is a verbatim copy of a structured column — no mapping, no interpretation.
+
+**Defer to Step 7b gap-fill** — do not set in Step D:
+- Any field whose value requires interpreting a protocol or kit name string to select an enum value (e.g., strand orientation inferred from the library preparation kit name)
+- Any field whose value requires biological reasoning applied to a sample description (e.g., disease classification, model organism genotype, experimental condition)
+- Any field whose value requires reading a methods section, supplementary table, or publication abstract
+- Any field that is not directly available as a column in ENA filereport or GEO SOFT
+
+If you set a field in Step D based on reasoning (not a direct column read), you bake a guess into the file before the structured gap-fill tiers can evaluate it properly. The gap-fill audit (Step 7b) only fills gaps — it will not re-examine or correct a field that is already set. **Set it wrong in Step D and it stays wrong.**
 
 > **CRITICAL — NEVER set on File entities:**
 > - **`resourceStatus`** — belongs ONLY on the Project and Dataset entity annotations. Setting it on files causes the Datasets tab to show a `resourceStatus` column with values that data managers must manually remove.
@@ -609,7 +606,13 @@ for child in syn.getChildren(files_folder_id, includeTypes=['file']):
 
 **Assay-target fields** — for any ChIP-seq, CUT&RUN, or antibody-based assay, check `schema_props` for a target/antibody field and populate it from GEO `!Series_extract_protocol_ch1` or ENA `library_selection`/experiment title. This enables faceted filtering by target in the portal.
 
-**Per-file** (values that differ per file): `fileFormat`, `specimenID`, `individualID`, `readPair` (I1/R1/R2 for 10x; R1/R2 for paired-end), `modelAge` (if age varies per sample), `batchID` (if batch varies per file), `aliquotID`
+**Per-file fields** are those the schema defines as varying per sample — use `fetch_schema_properties()` to identify them. Common per-file concepts: file format, per-sample identifiers, per-sample biological attributes (age, sex, genotype, condition), read depth, read length.
+
+> **Per-sample identifier fields:** Use the biological sample identifier — not the sequencing run accession. For ENA/SRA files, the biological identifier is found in `sample_title`, `sample_alias`, or BioSample accession (SAMN/SAME/SAMD) from the ENA filereport. Run accessions (SRR, ERR, DRR) identify sequencing runs, not biological individuals, and must never be used for specimen or individual identity fields. For studies with a patient/sample naming convention (e.g. from supplementary tables), derive individual IDs from that nomenclature.
+
+> **Fields with an empty enum:** Before setting any field from `fetch_schema_properties()`, check whether the field's enum list is empty. If `"enum": []`, do not set that field — an empty enum means no valid value exists in the current schema version.
+
+> **External hosting repository fields:** Any schema field that captures where files are physically hosted must reflect the actual file host, not the study discovery path. If files are stored in ENA/SRA and the study was discovered via a GEO link, the hosting repository field value must be 'ENA' or 'SRA' — GEO is a study metadata portal, not a file host.
 
 ---
 
