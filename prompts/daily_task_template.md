@@ -30,6 +30,8 @@ Read `config/settings.yaml` to get `WORKSPACE_DIR = agent.workspace_dir` and `ST
 mkdir -p {WORKSPACE_DIR}
 ```
 
+**Load skill files before any annotation work.** Read `.nadia/skills/annotation_patterns.yaml` if it exists. Each entry in `patterns` is a concrete rule derived from prior human feedback and approvals — treat these as authoritative supplements to CLAUDE.md. Print: "Loaded N annotation patterns from skill file."
+
 Write and run `{WORKSPACE_DIR}/setup.py`:
 1. Read `config/settings.yaml` for all runtime config (workspace_dir, state_table_prefix, state_project_name, etc.)
 2. Authenticate with Synapse via `lib/synapse_login.py` — print the logged-in username

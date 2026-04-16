@@ -1,0 +1,128 @@
+# NADIA Annotation Skill File
+#
+# Accumulated annotation patterns discovered via the Dream self-improvement loop.
+# Each entry records a concrete rule, its source (fix command or positive confirmation),
+# and the issue(s) that informed it. NADIA loads this file at run start (Step 1) to
+# prime its annotation decisions before encountering new datasets.
+#
+# Format per entry:
+#   pattern:   short name
+#   rule:      the concrete, actionable rule
+#   source:    "fix" (human correction) | "confirmed" (human approved without changes)
+#   issues:    list of GitHub issue numbers that informed this rule
+#   added:     ISO date this entry was created or last updated
+
+patterns:
+
+  - pattern: "ENA submitter is not the PI"
+    rule: >
+      The ENA/ArrayExpress submitter field reflects whoever deposited the files —
+      often a postdoc or research engineer, not the principal investigator.
+      Always derive the investigator/studyLeads field from the PubMed AuthorList
+      (first + last/corresponding author). Only fall back to repository submitter
+      if no PMID is available and BioStudies has no explicit PI role listed.
+    source: fix
+    issues: []
+    added: "2026-04-16"
+
+  - pattern: "libraryPreparationMethod must be verified from source"
+    rule: >
+      Do not infer libraryPreparationMethod from the assay type or paper title.
+      '10x Chromium' does not imply any specific kit version. Check ENA sample
+      attributes, BioStudies protocol section, or GEO GSM characteristics for the
+      explicit kit/method name. If not found in any source, set to 'unknown' and
+      flag in the curation comment — do not guess.
+    source: fix
+    issues: []
+    added: "2026-04-16"
+
+  - pattern: "readPair enum is empty — do not set"
+    rule: >
+      The readPair field in the RNA-seq template has an empty enum list.
+      An empty enum means no valid value exists in the current schema version.
+      Do not set readPair at all — setting it will fail schema validation.
+      This applies to any schema field where fetch_schema_properties() returns
+      "enum": [] for that field.
+    source: fix
+    issues: []
+    added: "2026-04-16"
+
+  - pattern: "per-patient diagnosis often not in GEO metadata"
+    rule: >
+      For fields capturing individual-level diagnosis, genotype, or condition,
+      GEO sample characteristics frequently omit this information or use
+      placeholder values. When the study has multiple patient/sample groups,
+      check PMC full-text supplementary tables (Tier 2) before declaring the
+      field unresolvable. Supplementary Table 1 often contains per-patient
+      diagnosis, age, sex, and sample IDs that map to GSM accessions.
+    source: fix
+    issues: []
+    added: "2026-04-16"
+
+  - pattern: "dissociationMethod NaN artifact"
+    rule: >
+      When dissociationMethod (or any field) is set to 'NaN', that is an
+      artifact of pandas NaN serialization — not a valid enum value. The audit
+      step must treat NaN/nan/None as missing, not as a set value. Any field
+      with value NaN, nan, or the string 'None' must be cleared and re-derived
+      from source metadata.
+    source: fix
+    issues: []
+    added: "2026-04-16"
+
+  - pattern: "resourceStatus must not appear on File entities"
+    rule: >
+      The resourceStatus / resource review status annotation belongs only on
+      Project entities and Dataset entities. Never set it on individual File
+      entities — doing so creates a spurious column in the portal Datasets tab.
+      The audit step (Step 7) must explicitly scan and remove resourceStatus
+      from all File entities.
+    source: fix
+    issues: []
+    added: "2026-04-16"
+
+  - pattern: "GEO RAW.tar contains unprocessed files"
+    rule: >
+      GEO supplementary archives named *_RAW.tar contain raw/unprocessed data
+      files (e.g. raw FASTQ, raw count matrices). Do not skip these — extract
+      and register them under the Raw Data folder. They are distinct from the
+      processed matrix files in the main series files. Check for both
+      *_RAW.tar (raw) and separate processed files in the GEO supplementary list.
+    source: fix
+    issues: []
+    added: "2026-04-16"
+
+  - pattern: "specimenID must be unique per file"
+    rule: >
+      specimenID (or whichever schema field captures the biological specimen
+      identifier) must be a unique value per file — never copy a single shared
+      value to all files. Map each file back to its SRR → SRX → GSM or
+      BioSample accession. Use sample_title or sample_alias from ENA filereport,
+      or the GSM identifier from GEO, not the SRR run accession itself.
+    source: fix
+    issues: []
+    added: "2026-04-16"
+
+  - pattern: "assay specificity: scRNA-seq vs RNA-seq"
+    rule: >
+      When source metadata contains library_source = 'TRANSCRIPTOMIC SINGLE CELL',
+      library_strategy = 'scRNA-seq', or protocol mentions '10x Chromium',
+      'Drop-seq', 'Smart-seq2 per-cell', 'inDrop', or 'Fluidigm C1':
+      set assay to 'single-cell RNA-seq', NOT 'RNA-seq'. The publication title
+      alone is not reliable — verify from ENA library metadata or GEO sample
+      characteristics.
+    source: fix
+    issues: []
+    added: "2026-04-16"
+
+  - pattern: "elink ownership verification required"
+    rule: >
+      NCBI elink frequently returns GEO/SRA accessions from papers other than
+      the one being processed. For every GEO accession from elink, call
+      Entrez.esummary(db='gds', id=...) and verify that PubMedIds contains
+      the PMID being processed. If it does not match, discard the accession —
+      do not process it under the wrong paper. It will be discovered again when
+      its actual paper is processed.
+    source: fix
+    issues: []
+    added: "2026-04-16"
