@@ -200,15 +200,14 @@ syn.restPUT(f'/entity/{dataset_id}', json.dumps(ds_body))
 
 ### Step 5 — Bind metadata schema to the files folder and validate
 
-Always pass the **unversioned** URI (e.g. `org.synapse.nf-rnaseqtemplate`). Synapse resolves it to the latest registered version at bind time and records the pinned semantic version in the binding. Read back the binding immediately after to capture which version was actually applied.
-
 ```python
 import time
 
-bind_result = bind_schema(syn, files_folder.id, schema_uri)
-# bind_result['schema_version']  → e.g. '10.6.2' — the version actually bound
-# bind_result['bound_schema_id'] → e.g. 'org.synapse.nf-rnaseqtemplate-10.6.2'
-schema_version = bind_result.get('schema_version')  # store in created_projects.json
+js = syn.service('json_schema')
+js.bind_json_schema(schema_uri, files_folder.id)   # ← bind to FILES FOLDER, not Dataset
+time.sleep(3)
+validation = js.validate(files_folder.id)
+print(f"  Schema bound: {schema_uri}")
 ```
 
 ### Step 6 — Mint a stable snapshot version of the Dataset
@@ -1071,49 +1070,20 @@ if source_meta_folder:
 - Do NOT use `/entity/{id}/jsonschema/binding` — that endpoint does not exist and returns 404.
 
 ```python
-def get_bound_schema_info(syn, folder_id: str) -> dict | None:
-    """
-    Returns full schema binding info for a folder, or None if no schema is bound.
-    Returned dict includes:
-      '$id'             — versioned schema URI (e.g. 'org.synapse.nf-rnaseqtemplate-10.6.2')
-      'semanticVersion' — semantic version string (e.g. '10.6.2'), or None if unversioned
-      'versionId'       — internal Synapse version ID
-    """
+def get_bound_schema_uri(syn, folder_id: str) -> str | None:
+    """Returns schema URI if a schema is bound to this folder, else None."""
     try:
         binding = syn.restGET(f'/entity/{folder_id}/schema/binding')
-        vi = binding.get('jsonSchemaVersionInfo', {})
-        return {
-            '$id':             vi.get('$id'),
-            'semanticVersion': vi.get('semanticVersion'),
-            'versionId':       vi.get('versionId'),
-        }
+        return binding.get('jsonSchemaVersionInfo', {}).get('$id')
     except Exception:
         return None  # 404 means no schema bound
-
-# Convenience alias for callers that only need the URI
-def get_bound_schema_uri(syn, folder_id: str) -> str | None:
-    info = get_bound_schema_info(syn, folder_id)
-    return info['$id'] if info else None
 ```
 
 ```python
 import time, httpx
 
 def bind_schema(syn, files_folder_id: str, schema_uri: str) -> dict:
-    """
-    Bind a metadata schema to a dataset files folder and validate.
-
-    Always pass the UNVERSIONED URI (e.g. 'org.synapse.nf-rnaseqtemplate') so
-    Synapse resolves to the latest registered version. After binding, read back
-    the resolved version from GET /entity/{id}/schema/binding so callers know
-    exactly which semantic version was applied.
-
-    Returns:
-      schema_uri          — the unversioned URI you passed in (used for future rebinding)
-      bound_schema_id     — the versioned URI Synapse resolved to (e.g. '...rnaseqtemplate-10.6.2')
-      schema_version      — semantic version string (e.g. '10.6.2'), or None
-      folder_id, status, validation
-    """
+    """Bind a chosen metadata schema to a dataset files folder and validate."""
     try:
         check = httpx.get(
             f'https://repo-prod.prod.sagebase.org/repo/v1/schema/type/registered/{schema_uri}',
@@ -1126,33 +1096,13 @@ def bind_schema(syn, files_folder_id: str, schema_uri: str) -> dict:
         js.bind_json_schema(schema_uri, files_folder_id)
         time.sleep(3)
 
-        # Read back the resolved version — Synapse pins the latest version at bind time
-        binding_info = get_bound_schema_info(syn, files_folder_id)
-        bound_id      = binding_info['$id']             if binding_info else schema_uri
-        schema_version = binding_info['semanticVersion'] if binding_info else None
-
         validation = js.validate(files_folder_id)
-        print(f"  Schema bound: {bound_id} (version {schema_version})")
-        return {
-            'schema_uri':      schema_uri,       # unversioned — use for future rebinding
-            'bound_schema_id': bound_id,          # versioned — what is actually bound now
-            'schema_version':  schema_version,    # e.g. '10.6.2' — record in created_projects.json
-            'folder_id':       files_folder_id,
-            'validation':      validation,
-            'status':          'bound',
-        }
+        return {'schema_uri': schema_uri, 'folder_id': files_folder_id,
+                'validation': validation, 'status': 'bound'}
     except Exception as e:
         print(f"  Warning: schema binding failed for {files_folder_id}: {e}")
         return {'schema_uri': schema_uri, 'folder_id': files_folder_id,
                 'status': 'error', 'error': str(e)}
-```
-
-**After binding, store `schema_version` in `created_projects.json`** alongside each dataset's `schema_uri` entry:
-```python
-# In the dataset dict written to created_projects.json:
-dataset_entry['schema_uri']     = bind_result['schema_uri']      # unversioned alias
-dataset_entry['schema_version'] = bind_result['schema_version']  # e.g. '10.6.2'
-dataset_entry['bound_schema_id'] = bind_result['bound_schema_id'] # fully pinned URI
 ```
 
 Validation warnings are expected at this stage — some required fields can only be filled by human curators. The binding itself is what matters for Curator Grid visibility.
@@ -1671,20 +1621,16 @@ for proj in created:
         # 4d. Schema binding
         if schema_uri and files_folder_id:
             try:
-                binding_info = get_bound_schema_info(syn, files_folder_id)
-                if binding_info and binding_info.get('$id'):
-                    bound_id = binding_info['$id']
-                    schema_version = binding_info.get('semanticVersion', 'unknown')
-                    print(f"    Schema: OK ({bound_id}, version {schema_version})")
-                    # Record resolved version in audit output for provenance tracking
-                    result['schema_version'] = schema_version
-                    result['bound_schema_id'] = bound_id
-                else:
-                    bind_result = bind_schema(syn, files_folder_id, schema_uri)
-                    result['fixes_applied'].append(f'{acc}: Schema {bind_result.get("bound_schema_id", schema_uri)} bound')
-                    result['schema_version'] = bind_result.get('schema_version')
-                    result['bound_schema_id'] = bind_result.get('bound_schema_id')
-                    print(f"    Schema: FIXED — bound {bind_result.get('bound_schema_id', schema_uri)}")
+                try:
+                    binding = syn.restGET(f'/entity/{files_folder_id}/schema/binding')
+                    bound_uri = binding.get('jsonSchemaVersionInfo', {}).get('$id', '')
+                    print(f"    Schema: OK ({bound_uri})")
+                except Exception:
+                    js = syn.service('json_schema')
+                    js.bind_json_schema(schema_uri, files_folder_id)
+                    time.sleep(2)
+                    result['fixes_applied'].append(f'{acc}: Schema {schema_uri} bound')
+                    print(f"    Schema: FIXED — bound {schema_uri}")
             except Exception as e:
                 result['warnings'].append(f'{acc}: Schema binding failed: {e}')
 
