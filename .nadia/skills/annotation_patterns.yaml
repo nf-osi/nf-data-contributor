@@ -226,6 +226,24 @@ patterns:
     issues: [220, 223]
     added: "2026-04-16"
 
+  - pattern: "sex/age/diagnosis absent from GEO metadata — try supplementary tables first"
+    rule: >
+      Fields like sex, age, diagnosis, genotype, and treatment condition are routinely
+      absent from GEO sample characteristics and ENA BioSample attributes, but are
+      almost always present in the paper's Supplementary Table 1 (sample manifest).
+      Do NOT flag these fields for human review without first:
+        1. Calling fetch_geo_supplementary_files(gse) to list supplementary files
+        2. Downloading each candidate file with try_download_and_parse_table(url)
+        3. Calling find_sample_metadata_table(tables, sample_ids) to find the manifest
+        4. Applying per-sample values from the matched rows
+      "Not in GEO metadata" is not a stopping condition — it means "continue to
+      supplementary tables". A curation comment that says "sex not in GEO metadata —
+      needs human review" without having attempted the supplementary tables is an
+      incomplete gap-fill, not a genuine gap.
+    source: fix
+    issues: [123]
+    added: "2026-04-16"
+
   - pattern: "Wiki must include Auto-curated attribution and disclaimer"
     rule: >
       The wiki footer line must read:

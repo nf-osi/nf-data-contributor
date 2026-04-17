@@ -67,10 +67,12 @@ Fields describing the biological sample: organism/species, sex, age, tissue, cel
 2. ENA filereport (columns: `scientific_name`, `sample_title`, `sample_alias`, `tax_id`)
 3. BioSample attributes (fetch via NCBI `efetch?db=biosample&id={biosample_id}`) — richer than ENA filereport
 4. SRA BioSample XML attributes (same data, alternate form)
-5. Supplementary tables from the paper — download and parse (see Source Tier 3 below)
+5. **Supplementary tables from the paper** — download and parse (see `fetch_geo_supplementary_files` + `try_download_and_parse_table` in Source Tier 2). **This is mandatory, not optional.** Fields like `sex`, `age`, `diagnosis`, `genotype`, and `treatment` are routinely absent from GEO/ENA sample records but present in Supplementary Table 1 of the paper. "Not in GEO metadata" is not a stopping condition — always attempt supplementary tables before declaring a field unresolvable.
 6. PubMed abstract — extract disease terms, organism, tissue, cell type via reasoning
 7. PMC full text methods section — sex, age, genotype, treatment, dissociation protocol
 8. Data file inspection — h5ad/loom `obs` columns contain per-cell/per-sample annotations (see Source Tier 4)
+
+> **Never flag `sex`, `age`, `diagnosis`, `genotype`, or `treatment` for human review without first attempting supplementary table download.** These are the most commonly under-annotated fields in GEO/ENA records and the most commonly present in paper supplementary tables. A curation comment that says "sex not in GEO metadata" without having attempted the supplementary tables is an incomplete gap-fill.
 
 ### Category C — Study-level / investigator fields
 Fields that apply uniformly across all files in the study: funding agency, study leads, institutions, data type category, external accession identifiers, resource type.
@@ -277,7 +279,16 @@ def fetch_pmc_methods(pmid: str) -> str:
 
 ### Supplementary tables from GEO or publisher
 
-Supplementary tables are the single richest source of per-sample metadata (patient IDs, sex, age, diagnosis, genotype, treatment, etc.). Always attempt to fetch and parse them.
+**Supplementary tables are required work, not optional.** They are the single richest source of per-sample metadata (patient IDs, sex, age, diagnosis, genotype, treatment, etc.) and routinely contain information that GEO/ENA sample records omit entirely. For every project with missing Category B fields, you MUST attempt to fetch and parse supplementary tables before writing any gap report or flagging anything for human review.
+
+Workflow:
+1. Call `fetch_geo_supplementary_files(gse)` to list all supplementary files
+2. Download each candidate file with `try_download_and_parse_table(url)`
+3. Call `find_sample_metadata_table(tables, sample_ids)` to identify the sample manifest
+4. Map table rows to files via the matched ID column
+5. Apply per-sample values to each file's annotations
+
+Only after completing steps 1–5 with no result should a Category B field be declared unresolvable from supplementary tables.
 
 ```python
 import httpx, io, csv
@@ -643,7 +654,14 @@ def build_per_file_annotations(
 
 ## Gap Report Format
 
-After exhausting all sources, write a gap report. This becomes the `curation_notes` block posted in the GitHub curation comment.
+After exhausting **all** sources (all four tiers), write a gap report. This becomes the `curation_notes` block posted in the GitHub curation comment.
+
+**Before writing any field to `gap_not_in_source`, verify:**
+- For Category B fields (sex, age, diagnosis, genotype, treatment): supplementary tables were attempted (`fetch_geo_supplementary_files` was called and at least one table was downloaded and inspected)
+- For Category A fields (instrument, library prep, strand): PMC methods section was fetched and scanned for kit/protocol names
+- For Category D fields (specimen ID, individual ID): the SRA run table was fetched and the per-sample BioSample XML was checked
+
+A field in `gap_not_in_source` that skipped any of these mandatory sources is an incomplete gap-fill, not a legitimate gap.
 
 ```python
 GAP_CATEGORIES = {
