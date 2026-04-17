@@ -387,6 +387,29 @@ def fetch_pmc_supplementary_links(pmcid: str) -> list[str]:
 
 ### Unpaywall — access publisher PDFs/supplementary when not in PMC
 
+Try Unpaywall first. If it returns no OA location, also try Semantic Scholar, which indexes full text for many papers not in PMC and provides structured abstract/methods extraction:
+
+```python
+def get_semantic_scholar_tldr(doi: str) -> dict:
+    """Fetch Semantic Scholar record — tldr, abstract, and open-access PDF URL if available."""
+    resp = httpx.get(
+        f'https://api.semanticscholar.org/graph/v1/paper/DOI:{doi}',
+        params={'fields': 'title,abstract,tldr,openAccessPdf,authors'},
+        timeout=15
+    )
+    if resp.status_code != 200:
+        return {}
+    data = resp.json()
+    return {
+        'abstract': data.get('abstract', ''),
+        'tldr': (data.get('tldr') or {}).get('text', ''),
+        'pdf_url': (data.get('openAccessPdf') or {}).get('url'),
+    }
+    # pdf_url is a direct open-access PDF link when available — fetch and parse for methods text
+```
+
+> **When PMC returns no full text and Unpaywall returns no OA location:** the paper may still be programmatically inaccessible even if it appears readable in a browser (institutional access, publisher "free to read" walls that block bots). Try Semantic Scholar as a last resort. If that also fails, flag the field for human review with an explicit note: *"paper appears accessible via institutional subscription but full text is not programmatically available — age/sex require a human with journal access to populate."*
+
 ```python
 def get_unpaywall_oa_url(doi: str, contact_email: str) -> str | None:
     """Return the best open-access PDF URL for a DOI, or None if not available."""
