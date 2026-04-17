@@ -67,7 +67,7 @@ Fields describing the biological sample: organism/species, sex, age, tissue, cel
 2. ENA filereport (columns: `scientific_name`, `sample_title`, `sample_alias`, `tax_id`)
 3. BioSample attributes (fetch via NCBI `efetch?db=biosample&id={biosample_id}`) — richer than ENA filereport
 4. SRA BioSample XML attributes (same data, alternate form)
-5. **Supplementary tables from the paper** — download and parse (see `fetch_geo_supplementary_files` + `try_download_and_parse_table` in Source Tier 2). **This is mandatory, not optional.** Fields like `sex`, `age`, `diagnosis`, `genotype`, and `treatment` are routinely absent from GEO/ENA sample records but present in Supplementary Table 1 of the paper. "Not in GEO metadata" is not a stopping condition — always attempt supplementary tables before declaring a field unresolvable.
+5. **Paper tables and supplementary files** — download and parse all supplementary files (see `fetch_geo_supplementary_files` + `try_download_and_parse_table` in Source Tier 2) and fetch PMC full text to scan main-text tables. **This is mandatory, not optional.** Fields like `sex`, `age`, `diagnosis`, `genotype`, and `treatment` are routinely absent from GEO/ENA sample records but present somewhere in the paper — in any supplementary table, a main-text cohort table, the results section, or the methods section. "Not in GEO metadata" is not a stopping condition — always search the paper before declaring a field unresolvable.
 6. PubMed abstract — extract disease terms, organism, tissue, cell type via reasoning
 7. PMC full text methods section — sex, age, genotype, treatment, dissociation protocol
 8. Data file inspection — h5ad/loom `obs` columns contain per-cell/per-sample annotations (see Source Tier 4)
@@ -279,7 +279,7 @@ def fetch_pmc_methods(pmid: str) -> str:
 
 ### Supplementary tables from GEO or publisher
 
-**Supplementary tables are required work, not optional.** They are the single richest source of per-sample metadata (patient IDs, sex, age, diagnosis, genotype, treatment, etc.) and routinely contain information that GEO/ENA sample records omit entirely. For every project with missing Category B fields, you MUST attempt to fetch and parse supplementary tables before writing any gap report or flagging anything for human review.
+**Supplementary tables and paper text are required work, not optional.** Per-sample metadata (patient IDs, sex, age, diagnosis, genotype, treatment, etc.) that is absent from GEO/ENA sample records may appear anywhere in the paper — main-text tables, any supplementary table (not just Table 1), results section cohort descriptions, or methods section protocol details. For every project with missing Category B fields, you MUST attempt to retrieve this information from the paper before writing any gap report or flagging anything for human review.
 
 Workflow:
 1. Call `fetch_geo_supplementary_files(gse)` to list all supplementary files

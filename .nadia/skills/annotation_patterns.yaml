@@ -230,7 +230,8 @@ patterns:
     rule: >
       Fields like sex, age, diagnosis, genotype, and treatment condition are routinely
       absent from GEO sample characteristics and ENA BioSample attributes, but are
-      almost always present in the paper's Supplementary Table 1 (sample manifest).
+      frequently present somewhere in the paper — in the main text tables, in any
+      supplementary table, or described in the results/methods sections.
       Do NOT flag these fields for human review without first:
         1. Calling fetch_geo_supplementary_files(gse) to list supplementary files
         2. Downloading each candidate file with try_download_and_parse_table(url)
