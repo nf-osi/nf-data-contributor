@@ -351,7 +351,7 @@ Read `curation_checklist.required_dataset_annotations` from config for the full 
 
 Format: `{prefix}:{accession_id}`. One entry per repository accession. Set as a list.
 
-**Read `prompts/repo_apis.md`** for the full prefix table (GEO, SRA, ENA, EGA, ArrayExpress, PRIDE, MassIVE, MetaboLights, Zenodo, OSF, dbGaP, and others) and the `REPO_TO_PREFIX` dict. Do NOT add `pubmed:{pmid}` — PubMed is not a data repository. DataCite-indexed repos that lack a Bioregistry prefix use `doi:{doi}`.
+**Read `prompts/repo_apis.md`** for the common-case prefix table (GEO, SRA, ENA, EGA, ArrayExpress, PRIDE, MassIVE, MetaboLights, Zenodo, OSF, dbGaP, and others) and the `REPO_TO_PREFIX` dict. The authoritative/complete list of supported prefixes is the Sage-Bionetworks bioregistry collection — <https://github.com/Sage-Bionetworks/bioregistry-collection>; consult it for any repository not in the convenience table. Do NOT add `pubmed:{pmid}` — PubMed is not a data repository. Repos with no Bioregistry prefix fall back to `doi:{doi}`.
 
 ---
 

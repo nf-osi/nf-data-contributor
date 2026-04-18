@@ -623,6 +623,13 @@ def normalize_file_format(filename: str) -> str:
 
 Format: `{prefix}:{accession_id}`. One entry per repository accession. Set as a list.
 
+The table below is a convenience subset covering repositories NADIA encounters frequently. **The authoritative list of supported prefixes lives in the Sage-Bionetworks bioregistry collection: <https://github.com/Sage-Bionetworks/bioregistry-collection>.** Consult it whenever:
+- A data source isn't represented in the table below
+- You're unsure whether a prefix is accepted by the portal
+- A new repository type appears in discovery results
+
+If the collection lists a prefix for the repository, use it. If not — and the record has a DOI — fall back to `doi:{doi}`.
+
 | Repository | Prefix | Example |
 |-----------|--------|---------|
 | GEO | `geo` | `geo:GSE145064` |
