@@ -654,12 +654,16 @@ When a concept from the study is not in the schema enum (e.g., a tumor type or s
 
 ### 10 — Post-curation GitHub comment is required
 
-After completing annotations for each project, post a GitHub comment on the study-review issue documenting:
+After completing annotations for each project, post a GitHub comment on the study-review issue. Use `scripts/post_curation_comment.py`, which renders a `GapReport` JSON (produced by `lib/gap_report.py` during the initial pass in Step C and the audit pass in Step 7b) into a structured markdown comment. The rendered comment groups filled fields by tier (each row carries the source name and a verification URL), lists controlled-vocabulary approximations with the raw → mapped value, and surfaces remaining gaps with the tiers and sources already attempted.
+
+The comment must cover:
 - Which fields were set and what values were chosen
-- Which values were derived by reasoning vs. directly from source
+- Which values were derived by reasoning vs. directly from source (the tier grouping makes this explicit)
 - Any controlled vocabulary gaps or approximations made
 - Any fields that could not be populated and why
 - Items that require human review (ambiguous data, missing info, species mismatch, etc.)
+
+Do not hand-format this comment — always go through the `GapReport` → `post_curation_comment.py` path so every field carries a machine-readable source trail.
 
 This comment is the handoff from autonomous annotation to human review. Without it, data managers cannot evaluate the quality of the curation or identify what needs correction.
 

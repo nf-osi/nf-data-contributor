@@ -250,7 +250,7 @@ After running `audit.py`, read `{WORKSPACE_DIR}/audit_results.json`. For each pr
 
 6. For any field where no valid enum value exists: use the closest available enum value and record the gap explicitly.
 
-7. Write `{WORKSPACE_DIR}/audit_reasoning_fixes.json` with all resolved values. Include a `gap_fill_report` per project (format defined in `prompts/annotation_gap_fill.md`) listing: which fields were filled at each tier, which values were found but failed enum validation (include the raw value), and which fields remain unfilled with the reason. This becomes the GitHub curation comment.
+7. Write `{WORKSPACE_DIR}/audit_reasoning_fixes.json` with all resolved values. In parallel, write `{WORKSPACE_DIR}/audit_gap_report_{project_id}.json` per project using `lib/gap_report.py::GapReport` (with `pass_='audit'`). Every filled field must carry a `SourceRef`; every gap must list the tiers and sources actually attempted. Step 7d will post this report as the GitHub curation comment.
 
 ### 7c — Write and run `{WORKSPACE_DIR}/apply_audit_fixes.py` (Phase 3)
 
@@ -273,14 +273,21 @@ Warnings remaining: N
 
 ### 7d — Post curation comments on GitHub issues
 
-For each project that was created or updated in this run, post a comment on its GitHub study-review issue documenting what was done. The comment should include:
-- A summary of which annotation fields were set and the key values chosen
-- Which values were read directly from the source repository vs. reasoned from the abstract
-- Any controlled vocabulary gaps (value not in enum → closest enum used + explanation)
-- Any fields that could not be populated and why
-- Items that require human review (ambiguous species, unverified study leads, missing tumor type, etc.)
+For each project that was created or updated in this run, a `GapReport` JSON was written during the initial pass (Step C in `prompts/synapse_workflow.md`) and an audit-pass `GapReport` was written in Step 7b. Post the **audit-pass** report as a comment so the reviewer sees the final state.
 
-Use `scripts/github_issue.py`'s `post_issue_comment()` function. This is not optional — the comment is the primary handoff to human reviewers.
+Use `scripts/post_curation_comment.py` — it loads the JSON, fetches the bound schema to compute completeness, and posts the rendered markdown via `github_issue.py::post_issue_comment`:
+
+```python
+import subprocess, sys
+subprocess.run([
+    sys.executable, 'scripts/post_curation_comment.py',
+    '--issue-number', str(issue_number),
+    '--gap-report-file', f'{WORKSPACE_DIR}/audit_gap_report_{project_id}.json',
+    '--synapse-project-id', project_id,
+], check=False)  # non-fatal on failure
+```
+
+The rendered comment groups filled fields by tier (each with source + verification URL), lists controlled-vocabulary approximations with the raw value and the enum it was mapped to, and calls out remaining gaps with the tiers/sources already attempted. This is not optional — the comment is the primary handoff to human reviewers.
 
 ---
 

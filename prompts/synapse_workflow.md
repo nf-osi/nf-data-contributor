@@ -357,50 +357,23 @@ def fetch_schema_enums(schema_uri: str) -> dict[str, list[str]]:
 
 After fetching enums, also collect all property names the schema defines. This determines what fields you CAN set — do not hardcode field names anywhere.
 
+**Use the shared helper in `lib/schema_properties.py`** — do not re-author the fetcher in generated scripts. The library version parses the same JSON Schema layers (`properties`, `anyOf`/`oneOf`, `$defs`) and is covered by unit tests.
+
 ```python
-def fetch_schema_properties(schema_uri: str) -> dict:
-    """
-    Return a dict of all property names defined in the schema.
-    Keys = field names. Values = dict with 'type', 'enum' (if constrained), 'description'.
-    Use this to know which fields exist — then populate as many as source data supports.
-    """
-    url = f'https://repo-prod.prod.sagebase.org/repo/v1/schema/type/registered/{schema_uri}'
-    resp = httpx.get(url, timeout=15)
-    resp.raise_for_status()
-    schema = resp.json()
+import sys, os
+sys.path.insert(0, os.environ.get('AGENT_REPO_ROOT', '.') + '/lib')
+from schema_properties import fetch_schema_properties
 
-    props = {}
-    def collect_props(obj):
-        if not isinstance(obj, dict):
-            return
-        for field_name, field_def in obj.get('properties', {}).items():
-            if not isinstance(field_def, dict):
-                continue
-            entry = {}
-            if 'enum' in field_def:
-                entry['enum'] = field_def['enum']
-                entry['type'] = 'enum'
-            else:
-                for sub_key in ('anyOf', 'oneOf'):
-                    for sub in field_def.get(sub_key, []):
-                        if 'enum' in sub:
-                            entry['enum'] = sub['enum']
-                            entry['type'] = 'enum'
-                if 'type' not in entry:
-                    entry['type'] = field_def.get('type', 'string')
-            entry['description'] = field_def.get('description', '')
-            props[field_name] = entry
-        for defs_key in ('definitions', '$defs'):
-            for defn in obj.get(defs_key, {}).values():
-                collect_props(defn)
-    collect_props(schema)
-    return props
-
-# Usage:
 schema_props = fetch_schema_properties(schema_uri)
 # schema_props is the ground truth — only set fields that appear here
 print(f"  Schema has {len(schema_props)} properties: {sorted(schema_props.keys())}")
 ```
+
+`fetch_schema_properties` returns `{field_name: {"type", "enum"?, "description"}}`. Companion helpers in the same module:
+
+- `validate_against_enum(raw_value, field_props) -> str | None` — maps a raw source value to a valid enum entry or returns None.
+- `is_empty_enum(field_props) -> bool` — True when an enum field has no valid values (skip it entirely).
+- `is_never_on_files() -> frozenset[str]` — annotation keys forbidden on File entities (`resourceStatus`, `filename`).
 
 ### Step B — Extract raw metadata from ALL source types
 
@@ -527,35 +500,58 @@ def fetch_pubmed_full(pmid: str) -> dict:
     }
 ```
 
-### Step C — Populate ALL schema properties via gap-fill
+### Step C — Populate ALL schema properties via gap-fill (primary pass)
 
-**Read `prompts/annotation_gap_fill.md` for the complete algorithm.** This step runs the full gap-fill strategy — not just the primary source, but every available upstream source — before applying any annotations to File entities.
+**Read `prompts/annotation_gap_fill.md` for the complete algorithm.** Step C runs the full gap-fill strategy — not just the primary source, but every available upstream source — **before** `synapse_actions.py` is generated. By the time Step D applies annotations to File entities, every schema field that has a reachable source is already populated in `normalized_annotations`. Treating gap-fill as an audit-time cleanup is the pattern this step exists to replace.
 
 The process:
-1. Start with `schema_props = fetch_schema_properties(schema_uri)` and `raw_metadata` from Step B
-2. Classify each schema field into a category (technical/library, biological/sample, study-level, identifier, model system) — see Field Categories in `prompts/annotation_gap_fill.md`
-3. For each field, work through the source priority list for its category (Tier 1 → Tier 2 → Tier 3 → Tier 4) until a valid value is found
-4. Validate every extracted value against the field's enum constraint before accepting it
-5. Build `per_file_annotations` (fields that vary per file) and `study_level_annotations` (fields uniform across all files)
-6. Merge into `normalized_annotations` keyed only by fields present in `schema_props`
-7. Record what tier each value came from in `normalized_annotations_sources.json`
+
+1. Start with `schema_props = fetch_schema_properties(schema_uri)` (from `lib/schema_properties`) and `raw_metadata` from Step B.
+2. Instantiate a `GapReport(project_id=..., schema_uri=..., pass_='initial')` from `lib/gap_report`.
+3. Classify each schema field into a category (technical/library, biological/sample, study-level, identifier, model system) — see Field Categories in `prompts/annotation_gap_fill.md`.
+4. For each field, work through the source priority list for its category (Tier 1 → Tier 2 → Tier 3 → Tier 4) until a valid value is found. Validate every extracted value through `validate_against_enum()` from `lib/schema_properties` before accepting it. Record the result on the `GapReport`.
+5. Build `per_file_annotations` (fields that vary per file) and `study_level_annotations` (fields uniform across all files).
+6. Merge into `normalized_annotations` keyed only by fields present in `schema_props`.
+7. Write the gap report JSON to `{WORKSPACE_DIR}/gap_report_{project_id}.json`.
 
 ```python
-import json
+import sys, os, json
+sys.path.insert(0, os.environ.get('AGENT_REPO_ROOT', '.') + '/lib')
 
-# After running the gap-fill algorithm from prompts/annotation_gap_fill.md:
-# normalized = {field: value}  — only fields in schema_props, all enum-validated
-# per_file   = {run_accession: {field: value}}  — per-sample varying values
-# gap_report = {filled_tier1: [...], filled_tier2: [...], gap_not_in_source: [...], ...}
+from schema_properties import fetch_schema_properties, validate_against_enum, is_empty_enum, is_never_on_files
+from gap_report import GapReport, SourceRef
+
+schema_props = fetch_schema_properties(schema_uri)
+report = GapReport(project_id=project_id, schema_uri=schema_uri, pass_='initial')
+
+# ... run the algorithm from prompts/annotation_gap_fill.md, adding to `report` as you go:
+#   report.add_filled(field, validated_value, SourceRef(name=..., tier=1|2|3|4, url=..., field_in_source=...))
+#   report.add_approximation(field, raw_value, mapped_to=..., available_enums=..., source=SourceRef(...))
+#   report.add_gap(field, tiers_attempted=[1,2], sources_attempted=[...], reason='...')
 
 with open(f'{WORKSPACE_DIR}/normalized_annotations.json', 'w') as f:
     json.dump(normalized, f, indent=2)
-with open(f'{WORKSPACE_DIR}/normalized_annotations_sources.json', 'w') as f:
-    json.dump({'study_level': normalized, 'per_file': per_file, 'gap_report': gap_report}, f, indent=2)
+with open(f'{WORKSPACE_DIR}/per_file_annotations.json', 'w') as f:
+    json.dump(per_file, f, indent=2)
+with open(f'{WORKSPACE_DIR}/gap_report_{project_id}.json', 'w') as f:
+    f.write(report.to_json())
+
+completeness = report.completeness(schema_props)
 print(f"  Normalized {len(normalized)} study-level + {len(per_file)} per-file annotation fields")
-print(f"  Gap fill: T1={len(gap_report['filled_tier1'])} T2={len(gap_report['filled_tier2'])} "
-      f"T3={len(gap_report['filled_tier3'])} T4={len(gap_report['filled_tier4'])} "
-      f"unfilled={len(gap_report['gap_not_in_source'])}")
+print(f"  Gap fill: {report.render_summary_line()} · completeness={completeness:.0%}"
+      if completeness is not None else f"  Gap fill: {report.render_summary_line()}")
+```
+
+**After writing the report, post the initial-pass curation comment** so the issue has provenance before any human opens it. If the issue was created earlier in the run, record `issue_number` and reuse it here:
+
+```python
+import subprocess
+subprocess.run([
+    sys.executable, 'scripts/post_curation_comment.py',
+    '--issue-number', str(issue_number),
+    '--gap-report-file', f'{WORKSPACE_DIR}/gap_report_{project_id}.json',
+    '--synapse-project-id', project_id,
+], check=False)  # non-fatal
 ```
 
 **Key constraints:**

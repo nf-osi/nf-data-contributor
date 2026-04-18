@@ -2,44 +2,94 @@
 
 This file defines the **generalized, schema-driven gap-fill algorithm** used whenever file annotations are incomplete. Run it in two situations:
 
-1. **During initial annotation** — after Step C normalization in `prompts/synapse_workflow.md`, before applying annotations to File entities. This is the primary pass.
+1. **During initial annotation** — after Step B raw metadata collection in `prompts/synapse_workflow.md`, and **before** any File entity is created or annotated. Gap-fill is the primary annotation pass, not a cleanup step. By the time `synapse_actions.py` writes annotations, every schema field that has a reachable source must already be populated.
 2. **During audit (Step 7b)** — for any field that remains unset after Phase 1 auto-fixes. This is the remediation pass.
 
 In both cases the algorithm is the same. The only difference is the starting point: in the initial pass you start from zero; in the audit pass you start from what Phase 1 already set.
+
+## Required library imports
+
+Use the shared helpers in `lib/` — do not re-author them in generated scripts:
+
+```python
+import sys, os
+sys.path.insert(0, os.environ.get('AGENT_REPO_ROOT', '.') + '/lib')
+
+from schema_properties import (
+    fetch_schema_properties,
+    validate_against_enum,
+    is_empty_enum,
+    is_never_on_files,
+)
+from gap_report import GapReport, SourceRef
+```
+
+`fetch_schema_properties` and `validate_against_enum` in `lib/schema_properties.py` are the single source of truth for schema introspection and enum mapping. `GapReport` in `lib/gap_report.py` is the single source of truth for recording provenance — every filled field carries a `SourceRef`, and every unresolved gap carries the list of tiers and sources that were actually attempted.
 
 ---
 
 ## The Algorithm
 
-```
-for each dataset in project:
-  schema_props  = fetch_schema_properties(schema_uri)          # all fields the schema defines
-  current_anns  = aggregate_file_annotations(files_folder_id)  # what's currently set
-  never_set     = {'resourceStatus', 'filename'}               # never on File entities
-  empty_enum    = {f for f, p in schema_props.items()          # fields with no valid values
-                   if p.get('type') == 'enum' and not p.get('enum')}
-  missing       = set(schema_props) - set(current_anns) - never_set - empty_enum
+```python
+report = GapReport(project_id=project_id, schema_uri=schema_uri, pass_='initial')  # or 'audit'
 
-  for field in missing:
-    category = classify_field(field, schema_props[field])      # see Field Categories below
-    sources  = SOURCE_PRIORITY[category]                       # ordered list of source types
+schema_props = fetch_schema_properties(schema_uri)
+current_anns = aggregate_file_annotations(files_folder_id)
+never_set    = is_never_on_files()
+empty_enum   = {f for f, p in schema_props.items() if is_empty_enum(p)}
+missing      = set(schema_props) - set(current_anns) - never_set - empty_enum
 
-    for source_type in sources:
-      raw_value = try_extract(source_type, field, schema_props[field], context)
-      if raw_value is None:
-        continue
-      validated = validate_against_enum(raw_value, schema_props[field])
-      if validated is not None:
-        apply_annotation(field, validated)                     # write to Synapse
+for field_name in missing:
+    category = classify_field(field_name, schema_props[field_name])  # Category A-E
+    tiers_attempted: list[int] = []
+    sources_attempted: list[str] = []
+
+    for source_type in SOURCE_PRIORITY[category]:
+        tier = SOURCE_TIER[source_type]
+        tiers_attempted.append(tier)
+        sources_attempted.append(source_type)
+
+        raw_value, source_ref = try_extract(source_type, field_name, schema_props[field_name], context)
+        if raw_value is None:
+            continue
+
+        validated = validate_against_enum(raw_value, schema_props[field_name])
+        if validated is None:
+            # Value found but no enum match — record the approximation and stop this field
+            report.add_approximation(
+                field_name=field_name,
+                raw_value=str(raw_value),
+                mapped_to=None,
+                available_enums=schema_props[field_name].get('enum', []),
+                source=source_ref,
+            )
+            break
+
+        if validated != str(raw_value).strip():
+            # An enum mapping was applied — surface it so humans can verify
+            report.add_approximation(
+                field_name=field_name,
+                raw_value=str(raw_value),
+                mapped_to=validated,
+                available_enums=schema_props[field_name].get('enum', []),
+                source=source_ref,
+            )
+        report.add_filled(field_name, validated, source_ref)
+        apply_annotation(field_name, validated)
         break
-      else:
-        log_gap(field, f"value '{raw_value}' found but not in enum")
-        break  # don't try another source for the same field with the wrong type of value
     else:
-      log_gap(field, "no value found in any source")
+        report.add_gap(
+            field_name=field_name,
+            tiers_attempted=sorted(set(tiers_attempted)),
+            sources_attempted=sources_attempted,
+            reason='no value found in any source',
+        )
 
-  write_gap_report(project_id, missing_fields, gaps_with_reasons)
+with open(f'{WORKSPACE_DIR}/gap_report_{project_id}.json', 'w') as f:
+    f.write(report.to_json())
 ```
+
+`try_extract` returns `(raw_value, SourceRef)` where the `SourceRef` captures tier, source name, and a verification URL when available. Every call to `report.add_filled(...)` or `report.add_gap(...)` writes one row the reviewer will see in the GitHub curation comment — make the source name specific (e.g. `"ENA filereport"`, not `"repository"`) and include the URL when one exists.
 
 ---
 
@@ -572,63 +622,29 @@ def inspect_count_matrix_header(url_or_path: str, max_bytes: int = 4096) -> list
 
 ## Validation and Enum Matching
 
-Before applying any value extracted from any source, validate it against the field's schema constraints:
+Before applying any value extracted from any source, validate it against the field's schema constraints using `validate_against_enum` from `lib/schema_properties`:
 
 ```python
-def validate_against_enum(raw_value: str, field_props: dict) -> str | None:
-    """
-    Given a raw value and schema field properties, return the valid enum entry
-    (exact case) or None if no match.
-    """
-    enum_list = field_props.get('enum', [])
-    if not enum_list:
-        # Free-text field — any non-empty string is valid
-        return raw_value.strip() if raw_value and raw_value.strip() else None
+from schema_properties import validate_against_enum
 
-    raw_norm = raw_value.strip().lower()
-
-    # 1. Exact match (case-insensitive)
-    for entry in enum_list:
-        if str(entry).lower() == raw_norm:
-            return str(entry)   # return exact enum case
-
-    # 2. Substring / prefix match for common abbreviations
-    for entry in enum_list:
-        if raw_norm in str(entry).lower() or str(entry).lower() in raw_norm:
-            return str(entry)
-
-    # 3. Domain-specific synonyms — built at runtime from the schema's actual enum values.
-    # Do not hardcode schema-specific enum strings here. Instead, after calling
-    # fetch_schema_properties(), inspect each enum list and build a synonym map for that
-    # field based on common abbreviations of the values present.
-    #
-    # Universal synonyms that apply across any life-science portal:
-    SYNONYMS = {
-        'homo sapiens': 'Homo sapiens',
-        'human': 'Homo sapiens',
-        'mus musculus': 'Mus musculus',
-        'mouse': 'Mus musculus',
-        'rattus norvegicus': 'Rattus norvegicus',
-        'rat': 'Rattus norvegicus',
-        'female': 'Female', 'f': 'Female', 'male': 'Male', 'm': 'Male',
-        'unknown': 'Unknown', 'not reported': 'Unknown',
-        'n/a': 'Unknown', 'na': 'Unknown', 'not applicable': 'Unknown',
-        'paired': 'Paired', 'paired-end': 'Paired',
-        'single': 'Single', 'single-end': 'Single',
-        'fresh frozen': 'Fresh Frozen', 'ffpe': 'FFPE',
-        'reverse stranded': 'SecondStranded',
-        'forward stranded': 'FirstStranded',
-        'unstranded': 'Unstranded',
-    }
-    # Note: all target values above must be verified against the actual enum list at
-    # runtime before applying — the `if candidate in enum_list` check below enforces this.
-    if raw_norm in SYNONYMS:
-        candidate = SYNONYMS[raw_norm]
-        if candidate in enum_list:
-            return candidate
-
-    return None  # no match — do not set the field, log the gap
+validated = validate_against_enum(raw_value, schema_props[field_name])
+if validated is None:
+    # No close match — record as an approximation with mapped_to=None and do not set the field
+    report.add_approximation(field_name, str(raw_value), mapped_to=None,
+                             available_enums=schema_props[field_name].get('enum', []),
+                             source=source_ref)
+elif validated != str(raw_value).strip():
+    # The value was mapped to a different enum entry — record the mapping for reviewer verification
+    report.add_approximation(field_name, str(raw_value), mapped_to=validated,
+                             available_enums=schema_props[field_name].get('enum', []),
+                             source=source_ref)
+    report.add_filled(field_name, validated, source_ref)
+else:
+    # Exact match — no approximation needed
+    report.add_filled(field_name, validated, source_ref)
 ```
+
+The library helper performs three matching stages in order: case-insensitive exact match against the enum, substantial substring match, and a universal synonym table (human/mouse/female/male/etc.) whose candidates must still appear in the schema enum to be accepted. For free-text fields (no enum), it returns the stripped raw value when non-empty. Schema-specific synonyms are built at runtime from the enum list for that field — do not add portal-specific strings to the library.
 
 ---
 
@@ -677,40 +693,91 @@ def build_per_file_annotations(
 
 ## Gap Report Format
 
-After exhausting **all** sources (all four tiers), write a gap report. This becomes the `curation_notes` block posted in the GitHub curation comment.
+The gap report is produced by `lib/gap_report.py::GapReport`. Every filled field carries a `SourceRef` (tier, source name, verification URL when available); every gap carries `tiers_attempted` and `sources_attempted` so the reviewer can see that the upstream sources were actually consulted. The report is serialized as JSON per project and later rendered into the GitHub curation comment by `scripts/post_curation_comment.py`.
 
-**Before writing any field to `gap_not_in_source`, verify:**
-- For Category B fields (sex, age, diagnosis, genotype, treatment): supplementary tables were attempted (`fetch_geo_supplementary_files` was called and at least one table was downloaded and inspected)
-- For Category A fields (instrument, library prep, strand): PMC methods section was fetched and scanned for kit/protocol names
-- For Category D fields (specimen ID, individual ID): the SRA run table was fetched and the per-sample BioSample XML was checked
+**Before writing any `report.add_gap(...)`, verify the source was actually attempted:**
+- For Category B fields (sex, age, diagnosis, genotype, treatment): supplementary tables were attempted (`fetch_geo_supplementary_files` was called and at least one table was downloaded and inspected).
+- For Category A fields (instrument, library prep, strand): the PMC methods section was fetched and scanned for kit/protocol names.
+- For Category D fields (specimen ID, individual ID): the SRA run table was fetched and the per-sample BioSample XML was checked.
 
-A field in `gap_not_in_source` that skipped any of these mandatory sources is an incomplete gap-fill, not a legitimate gap.
+A gap whose `sources_attempted` does not include the required sources for its category is an incomplete gap-fill, not a legitimate gap. Reviewers will see the `sources_attempted` list in the comment — do not list sources you did not actually call.
+
+### Recording filled values
 
 ```python
-GAP_CATEGORIES = {
-    'filled_tier1': [],    # value found in structured repo metadata
-    'filled_tier2': [],    # value found in publication metadata
-    'filled_tier3': [],    # value extracted from text via reasoning
-    'filled_tier4': [],    # value from data file inspection
-    'gap_not_in_source': [],   # field couldn't be populated — genuinely not in any source
-    'gap_not_in_enum':   [],   # value found but not in schema enum (log raw value)
-    'gap_not_applicable': [],  # field clearly N/A for this study type
-}
+from gap_report import SourceRef
 
-# Write to audit_reasoning_fixes.json under each project's entry.
-# Field names below are illustrative — use the actual schema field names from fetch_schema_properties():
-# {
-#   "project_id": "synXXX",
-#   "gap_fill_report": {
-#     "filled_tier1": ["<instrument field> = Illumina NovaSeq 6000", "<read-length field> = 150"],
-#     "filled_tier2": ["<sex field> = Female (from PubMed abstract)", ...],
-#     "filled_tier3": ["<dissociation field> = Collagenase IV (from PMC methods)", ...],
-#     "filled_tier4": ["<model-system field> = P1 (from h5ad obs['sample'])"],
-#     "gap_not_in_source": ["<age field>", "<age-unit field>"],
-#     "gap_not_in_enum": ["<dissociation field>: raw value 'enzymatic dissociation' has no enum match"],
-#     "gap_not_applicable": ["<antibody field>", "<perturbation field>"],
-#   }
-# }
+# Example: instrument from ENA filereport
+report.add_filled(
+    field_name='platform',
+    value='Illumina NovaSeq 6000',
+    source=SourceRef(
+        name='ENA filereport',
+        tier=1,
+        url=f'https://www.ebi.ac.uk/ena/portal/api/filereport?accession={study_accession}&result=read_run',
+        field_in_source='instrument_model',
+    ),
+)
+
+# Example: sex from PMC methods (Tier 3 reasoning)
+report.add_filled(
+    field_name='sex',
+    value='Female',
+    source=SourceRef(
+        name=f'PMC {pmcid} methods section',
+        tier=3,
+        url=f'https://www.ncbi.nlm.nih.gov/pmc/articles/{pmcid}/',
+        notes='all patients described as female in methods',
+    ),
+)
+```
+
+### Recording enum approximations
+
+When the raw source value does not match the schema enum exactly, always record the mapping so the reviewer can verify it or flag a vocabulary gap:
+
+```python
+# 'enzymatic dissociation' -> 'Enzymatic' when the enum has {Enzymatic, Mechanical, Unknown}
+report.add_approximation(
+    field_name='dissociationMethod',
+    raw_value='enzymatic dissociation (Collagenase IV + DNase I)',
+    mapped_to='Enzymatic',
+    available_enums=schema_props['dissociationMethod'].get('enum', []),
+    source=SourceRef(name=f'PMC {pmcid} methods section', tier=3,
+                     url=f'https://www.ncbi.nlm.nih.gov/pmc/articles/{pmcid}/'),
+)
+```
+
+If no close enum value exists, pass `mapped_to=None` and do not set the field — the reviewer will see it flagged.
+
+### Recording a real gap
+
+```python
+report.add_gap(
+    field_name='ageUnit',
+    tiers_attempted=[1, 2],
+    sources_attempted=['ENA filereport', 'GEO GSM characteristics',
+                       'PMC methods', 'supplementary Table S1'],
+    reason='paper reports age ranges ("young adult", "elderly") without numeric units',
+)
+```
+
+### Serializing and posting
+
+After the per-project loop completes, write the report and post the curation comment:
+
+```python
+gap_report_path = f'{WORKSPACE_DIR}/gap_report_{project_id}.json'
+with open(gap_report_path, 'w') as f:
+    f.write(report.to_json())
+
+import subprocess, sys as _sys
+subprocess.run([
+    _sys.executable, 'scripts/post_curation_comment.py',
+    '--issue-number', str(issue_number),
+    '--gap-report-file', gap_report_path,
+    '--synapse-project-id', project_id,
+], check=False)  # non-fatal on failure
 ```
 
 ---
@@ -719,21 +786,27 @@ GAP_CATEGORIES = {
 
 ### During initial annotation (Step C in synapse_workflow.md)
 
-After calling `fetch_schema_properties(schema_uri)` and building `normalized_annotations` from the primary source (ENA filereport + GEO SOFT), run the gap-fill algorithm immediately:
+Gap-fill is the **primary** annotation pass, not a remediation step. It runs before `synapse_actions.py` creates or annotates any File entity — so the Step C output already contains every field a schema-defined source can resolve.
 
-1. `missing = set(schema_props) - set(normalized_annotations) - never_set - empty_enum`
-2. If `missing` is non-empty, run the gap-fill algorithm against Tier 1–4 sources
-3. Merge gap-fill results into `normalized_annotations` before applying to File entities
-4. Record what was filled from each tier in `normalized_annotations_sources.json`
+1. Call `fetch_schema_properties(schema_uri)` from `lib/schema_properties`.
+2. Build `normalized_annotations` from structured metadata (ENA filereport, GEO SOFT, BioSample XML).
+3. Compute `missing = set(schema_props) - set(normalized_annotations) - is_never_on_files() - empty_enum`.
+4. If `missing` is non-empty, run the gap-fill algorithm against Tier 1–4 sources and update `normalized_annotations` with each valid result.
+5. For every filled field, call `report.add_filled(...)` with a real `SourceRef`. For every gap, call `report.add_gap(...)` with the actual tiers and sources attempted.
+6. Write `{WORKSPACE_DIR}/gap_report_{project_id}.json` (initial pass) and post it to the study-review issue via `scripts/post_curation_comment.py`.
+7. Only then apply `normalized_annotations` to File entities.
+
+Writing files twice — once with sparse annotations, then backfilling during audit — is exactly the pattern this pass exists to replace. If the gap report shows most fields coming from Tier 3 or Tier 4 during audit rather than Tier 1 during initial annotation, that is a sign Step C was skipped or ran incompletely.
 
 ### During audit (Step 7b in daily_task_template.md)
 
-After Phase 1 auto-fixes, for each project with remaining `reasoning_gaps`:
+After Phase 1 auto-fixes, for each project with remaining gaps:
 
-1. Load `{WORKSPACE_DIR}/audit_results.json` to get per-project current annotation state
-2. For each project, re-run the gap-fill algorithm against ALL tiers (Tier 1–4)
-3. Apply results via `apply_audit_fixes.py`
-4. Record all filled/unfilled fields in the gap report for the GitHub curation comment
+1. Load `{WORKSPACE_DIR}/audit_results.json` to get per-project current annotation state, and the initial-pass `gap_report_{project_id}.json` if it exists.
+2. Instantiate a new `GapReport(project_id=..., pass_='audit')` for this pass. (Do NOT mutate the initial-pass report — keep the two as separate artifacts so the completeness trend is visible across passes.)
+3. Re-run the gap-fill algorithm against ALL tiers (Tier 1–4) for any field still missing or flagged by Phase 1. Record each result via `report.add_filled(...)` / `report.add_approximation(...)` / `report.add_gap(...)` as in the initial pass.
+4. Apply the newly resolved values via `apply_audit_fixes.py`.
+5. Write `{WORKSPACE_DIR}/audit_gap_report_{project_id}.json` and post it via `scripts/post_curation_comment.py`. The comment header will say `Pass: audit` so reviewers can tell initial from audit passes.
 
 ### Priority rule: distinguish structured reads from reasoning guesses
 
