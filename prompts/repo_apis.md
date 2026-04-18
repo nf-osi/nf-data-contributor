@@ -619,6 +619,60 @@ def normalize_file_format(filename: str) -> str:
 
 ---
 
+## `alternateDataRepository` — Bioregistry Prefixes
+
+Format: `{prefix}:{accession_id}`. One entry per repository accession. Set as a list.
+
+| Repository | Prefix | Example |
+|-----------|--------|---------|
+| GEO | `geo` | `geo:GSE145064` |
+| SRA / INSDC | `insdc.sra` | `insdc.sra:SRP123456` |
+| BioProject | `bioproject` | `bioproject:PRJNA948468` |
+| ENA (European) | `insdc.sra` | `insdc.sra:PRJEB65920` |
+| dbGaP | `dbgap` | `dbgap:phs003519.v1.p1` |
+| EGA (study) | `ega.study` | `ega.study:EGAS00001006069` |
+| EGA (dataset) | `ega.dataset` | `ega.dataset:EGAD00001000123` |
+| ArrayExpress | `arrayexpress` | `arrayexpress:E-MTAB-6369` |
+| PRIDE | `pride.project` | `pride.project:PXD052910` |
+| MassIVE | `massive` | `massive:MSV000094567` |
+| MetaboLights | `metabolights` | `metabolights:MTBLS123` |
+| CELLxGENE | `cellxgene.collection` | `cellxgene.collection:{uuid}` |
+| cBioPortal | `cbioportal` | `cbioportal:schw_ctf_synodos_2025` |
+| Zenodo | `zenodo.record` | `zenodo.record:7012345` |
+| OSF | `osf` | `osf:abc12` |
+| NCI PDC | `pdc.study` | `pdc.study:PDC000123` |
+| Dryad | `dryad` | `dryad:dryad.abc123` |
+| Science Data Bank | `scidb` | `scidb:OA_0d24d3aa6238430a9f7ab564b36398d0` |
+| TIB (German Nat. Library) | `tib` | `tib:10.57702/4hwx66p6` |
+| Cell Image Library | `cil` | `cil:47049` |
+| NCI GDC | `gdc` | `gdc:TCGA-SARC` |
+
+Do NOT add `pubmed:{pmid}` — PubMed is not a data repository.
+
+**DataCite-indexed repos** (Science Data Bank, TIB, IFJ PAN, CORA, Iowa, Polish Academy, etc.) that lack a Bioregistry prefix: use `doi:{doi}` as the alternateDataRepository value.
+
+```python
+REPO_TO_PREFIX = {
+    'GEO': 'geo', 'SRA': 'insdc.sra', 'ENA': 'insdc.sra',
+    'BioProject': 'bioproject', 'dbGaP': 'dbgap',
+    'EGA': 'ega.study', 'ArrayExpress': 'arrayexpress',
+    'PRIDE': 'pride.project', 'MassIVE': 'massive',
+    'MetaboLights': 'metabolights', 'CELLxGENE': 'cellxgene.collection',
+    'Zenodo': 'zenodo.record', 'OSF': 'osf', 'PDC': 'pdc.study',
+    'cBioPortal': 'cbioportal', 'Dryad': 'dryad',
+    'Science Data Bank': 'scidb', 'TIB': 'tib',
+    'Cell Image Library': 'cil', 'NCI GDC': 'gdc',
+}
+
+alternate_data_repos = []
+for dataset in pub_group['datasets']:
+    prefix = REPO_TO_PREFIX.get(dataset['source_repository'])
+    if prefix:
+        alternate_data_repos.append(f"{prefix}:{dataset['accession_id']}")
+```
+
+---
+
 ## Important Notes
 
 - **No file count cap**: Always enumerate all files. Do not impose arbitrary per-dataset limits.
