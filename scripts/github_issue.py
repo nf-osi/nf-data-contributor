@@ -91,11 +91,12 @@ def _ensure_labels(labels):
     """Create labels in the repo if they don't already exist."""
     existing = {l["name"] for l in _github_request("GET", "labels?per_page=100")}
     defaults = {
-        "study-review":  {"color": "0075ca", "description": "NADIA study awaiting data manager review"},
-        "approved":      {"color": "0e8a16", "description": "Study approved — triggers portal provisioning"},
-        "needs-changes": {"color": "e4e669", "description": "Changes requested before approval"},
-        "dataset-added": {"color": "d93f0b", "description": "Dataset added to existing approved study"},
-        "automated":     {"color": "cccccc", "description": "Created by automated workflow"},
+        "study-review":     {"color": "0075ca", "description": "NADIA study awaiting data manager review"},
+        "approved":         {"color": "0e8a16", "description": "Study approved — triggers portal provisioning"},
+        "needs-changes":    {"color": "e4e669", "description": "Changes requested before approval"},
+        "dataset-added":    {"color": "d93f0b", "description": "Dataset added to existing approved study"},
+        "automated":        {"color": "cccccc", "description": "Created by automated workflow"},
+        "low-completeness": {"color": "b60205", "description": "GapReport completeness below threshold — curation needs review"},
     }
     for name in labels:
         if name not in existing and name in defaults:
@@ -107,6 +108,27 @@ def _ensure_labels(labels):
                 })
             except Exception:
                 pass  # label may already exist; non-fatal
+
+
+def add_issue_label(issue_number, label):
+    """Add a single label to an existing issue. Creates the label if known. Non-fatal on error."""
+    try:
+        _ensure_labels([label])
+        _github_request("POST", f"issues/{issue_number}/labels", {"labels": [label]})
+        return True
+    except Exception as e:
+        print(f"  WARN: could not add label '{label}' to issue #{issue_number}: {e}", file=sys.stderr)
+        return False
+
+
+def remove_issue_label(issue_number, label):
+    """Remove a label from an existing issue. Silent if the label isn't present."""
+    try:
+        _github_request("DELETE", f"issues/{issue_number}/labels/{label}")
+        return True
+    except Exception:
+        # GitHub returns 404 when the label isn't on the issue — that's fine
+        return False
 
 
 def build_issue_body(

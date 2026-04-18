@@ -183,6 +183,58 @@ class GapReport:
         populated = self.fields_populated() & applicable
         return len(populated) / len(applicable)
 
+    def weakest_fields(self, limit: int = 3) -> list[tuple[str, str]]:
+        """Return (field_name, human-readable reason) for the fields most needing review.
+
+        Ordering priority:
+          1. Unresolved gaps that need human follow-up
+          2. Approximations where the raw value could not be mapped into the enum
+          3. Approximations that were mapped to a close-but-inexact enum value
+          4. Remaining gaps (needs_human=False)
+
+        Used by the completeness gate to direct reviewer attention at the top
+        of the curation comment instead of burying concerns in long tables.
+        """
+        result: list[tuple[str, str]] = []
+
+        def _tier_suffix(tiers: list[int]) -> str:
+            if not tiers:
+                return ""
+            label = ", ".join(str(t) for t in tiers)
+            return f" (tier{'s' if len(tiers) > 1 else ''} {label} tried)"
+
+        for g in self.gaps:
+            if not g.needs_human:
+                continue
+            reason = g.reason or "no reachable source"
+            result.append((g.field, f"gap: {reason}{_tier_suffix(g.tiers_attempted)}"))
+            if len(result) >= limit:
+                return result
+
+        for a in self.approximations:
+            if a.mapped_to is None:
+                result.append((a.field, f"unmapped: `{a.raw_value}` not in enum"))
+                if len(result) >= limit:
+                    return result
+
+        for a in self.approximations:
+            if a.mapped_to is not None:
+                result.append(
+                    (a.field, f"approximated: `{a.raw_value}` → `{a.mapped_to}`")
+                )
+                if len(result) >= limit:
+                    return result
+
+        for g in self.gaps:
+            if g.needs_human:
+                continue
+            reason = g.reason or "not applicable"
+            result.append((g.field, f"gap: {reason}{_tier_suffix(g.tiers_attempted)}"))
+            if len(result) >= limit:
+                return result
+
+        return result
+
     # ---------------- Serialization ----------------
 
     def to_dict(self) -> dict:

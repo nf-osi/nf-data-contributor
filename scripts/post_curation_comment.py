@@ -5,6 +5,12 @@ again after Step 7b (audit remediation). Renders a GapReport JSON file as a
 markdown comment with per-field source provenance and posts it to the
 project's GitHub study-review issue.
 
+When the report's completeness falls below ``--completeness-threshold``
+(default 0.60), the script prepends a warning banner to the comment,
+lists the three weakest fields, and applies the ``low-completeness``
+label to the issue. When completeness recovers above the threshold on a
+later pass, the label is removed automatically.
+
 Usage (from agent-generated scripts or shell):
 
     python scripts/post_curation_comment.py \\
@@ -46,11 +52,46 @@ from gap_report import GapReport  # noqa: E402
 from schema_properties import fetch_schema_properties  # noqa: E402
 
 
+LOW_COMPLETENESS_LABEL = "low-completeness"
+
+
+def build_completeness_banner(
+    report: GapReport,
+    completeness: float,
+    threshold: float,
+    *,
+    label_applied: bool,
+) -> str:
+    """Return a markdown blockquote banner flagging low completeness.
+
+    Called only when ``completeness < threshold``. Lists the three weakest
+    fields so a reviewer knows where to look before scrolling into the main
+    tables.
+    """
+    weakest = report.weakest_fields(limit=3)
+    lines = [
+        f"> ⚠️ **Low completeness: {completeness:.0%}** "
+        f"(below {threshold:.0%} threshold)"
+        + (f" — `{LOW_COMPLETENESS_LABEL}` label applied." if label_applied else "."),
+        ">",
+    ]
+    if weakest:
+        lines.append("> Top fields needing attention:")
+        for field_name, reason in weakest:
+            lines.append(f"> - `{field_name}` — {reason}")
+    else:
+        lines.append("> No specific gaps recorded — review the full report below.")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def build_comment(
     gap_report: GapReport,
     *,
     synapse_project_id: str | None,
     schema_props: dict | None,
+    completeness_threshold: float,
+    label_applied: bool,
 ) -> str:
     """Assemble the full markdown body to post on the GitHub issue."""
     project_url = (
@@ -58,10 +99,20 @@ def build_comment(
         if synapse_project_id
         else None
     )
-    return gap_report.render_markdown(
+    body = gap_report.render_markdown(
         synapse_project_url=project_url,
         schema_props=schema_props,
     )
+    completeness = gap_report.completeness(schema_props)
+    if completeness is not None and completeness < completeness_threshold:
+        banner = build_completeness_banner(
+            gap_report,
+            completeness,
+            completeness_threshold,
+            label_applied=label_applied,
+        )
+        return banner + "\n" + body
+    return body
 
 
 def post(issue_number: int, body: str) -> str | None:
@@ -87,6 +138,34 @@ def post(issue_number: int, body: str) -> str | None:
         return None
 
 
+def apply_completeness_label(
+    issue_number: int,
+    completeness: float | None,
+    threshold: float,
+) -> bool:
+    """Add or remove the low-completeness label based on the current value.
+
+    Returns True if the label is (now) applied, False otherwise. Silent when
+    running without GitHub credentials or when completeness is None.
+    """
+    if completeness is None:
+        return False
+    if not os.environ.get("GITHUB_TOKEN") or not os.environ.get("GITHUB_REPOSITORY"):
+        # Local / dry-run: just report what would happen
+        return completeness < threshold
+
+    try:
+        from github_issue import add_issue_label, remove_issue_label
+    except ImportError as e:
+        print(f"  Could not import github_issue label helpers: {e}", file=sys.stderr)
+        return False
+
+    if completeness < threshold:
+        return add_issue_label(issue_number, LOW_COMPLETENESS_LABEL)
+    remove_issue_label(issue_number, LOW_COMPLETENESS_LABEL)
+    return False
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Post a source-tracked NADIA curation comment on a GitHub issue."
@@ -101,6 +180,12 @@ def main() -> int:
         "--synapse-project-id",
         default=None,
         help="Used to render a Synapse project link in the comment header.",
+    )
+    parser.add_argument(
+        "--completeness-threshold",
+        type=float,
+        default=0.60,
+        help="Applies the low-completeness label + banner when completeness is below this (0-1).",
     )
     parser.add_argument(
         "--skip-schema-fetch",
@@ -128,10 +213,26 @@ def main() -> int:
         except Exception as e:
             print(f"  WARN: could not fetch schema_props for completeness: {e}", file=sys.stderr)
 
+    completeness = report.completeness(schema_props)
+
+    # Apply / remove the label BEFORE posting the comment so the banner text
+    # accurately reflects whether the label is in place.
+    label_applied = False
+    if not args.dry_run:
+        label_applied = apply_completeness_label(
+            args.issue_number, completeness, args.completeness_threshold
+        )
+    else:
+        label_applied = (
+            completeness is not None and completeness < args.completeness_threshold
+        )
+
     body = build_comment(
         report,
         synapse_project_id=args.synapse_project_id or report.project_id,
         schema_props=schema_props,
+        completeness_threshold=args.completeness_threshold,
+        label_applied=label_applied,
     )
 
     if args.dry_run:
@@ -142,6 +243,8 @@ def main() -> int:
     result = {
         "issue_number": args.issue_number,
         "comment_url": comment_url,
+        "completeness": completeness,
+        "low_completeness_label_applied": label_applied,
         "stats": report.stats,
     }
     print(json.dumps(result))
