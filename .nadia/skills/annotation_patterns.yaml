@@ -127,32 +127,41 @@ patterns:
     issues: []
     added: "2026-04-16"
 
-  - pattern: "NF1 diagnosis scoping — somatic vs germline"
+  - pattern: "germline disease scoping — somatic vs germline"
     rule: >
-      Set disease annotations to NF1 ONLY when the biospecimens come from
-      a person (or model organism) with germline NF1 mutation. Somatic loss of
-      NF1 in a cancer cell line or tumor (e.g., NF1-depleted breast cancer cell
-      line, TCGA tumor with NF1 somatic mutation) does NOT qualify — those
-      samples are from the general cancer population, not NF1 patients.
-      To determine this: read the paper's patient/model description carefully.
-      Look for "NF1 patients", "neurofibromatosis type 1", "germline NF1", or
-      "NF1+/-" genotype (heterozygous model) vs "NF1 knockout in X cell line".
-      If uncertain, use a more specific cancer type annotation and flag for
-      human review. Do not default to NF1 when the connection is only somatic.
+      Set disease annotations (NF1, NF2, schwannomatosis/SMARCB1, etc.) ONLY
+      when the biospecimens come from a person (or model organism) with the
+      germline condition. Somatic loss of a disease gene in a cancer cell line
+      or tumor (e.g., NF1-depleted breast cancer line, TCGA tumor with NF1
+      mutation, SMARCB1-deficient renal medullary carcinoma from a patient who
+      does not have schwannomatosis) does NOT qualify — those are general cancer
+      samples, not hereditary disease patients.
+      To determine which applies: read the paper's patient/model description.
+      Look for "NF1/NF2/schwannomatosis patients", "germline mutation",
+      "Nf1+/- mouse" (heterozygous germline) vs "NF1 knockout in MCF-7".
+      If uncertain, use the specific tumor/cancer type annotation and flag for
+      human review. Never default to a hereditary disease annotation when the
+      connection to that disease is only somatic.
     source: fix
-    issues: [177, 244]
-    added: "2026-04-16"
+    issues: [177, 244, 194]
+    updated: "2026-04-19"
 
   - pattern: "studyLeads format: Firstname Lastname"
     rule: >
       The studyLeads field must use "Firstname Middlename/Initial Lastname"
       format — never "Lastname, Firstname" or "Lastname,F". PubMed AuthorList
       XML returns names as LastName + ForeName; always reformat as
-      f"{fore_name} {last_name}". For middle initials, use the format
-      "Sara Ortega-Bertran" not "Ortega-Bertran, Sara" or "S Ortega-Bertran".
+      f"{fore_name} {last_name}". For middle initials: "Scott P Angus" not
+      "Angus, Scott P" or "Angus SP".
+      IMPORTANT — GEO contributor fields use "Lastname SP" abbreviated format
+      (e.g. "Angus SP", "Mitchell DK"). Do NOT store these directly. Cross-
+      reference with PubMed AuthorList to resolve the full name: look up the
+      PMID from the GEO record, fetch AuthorList, and match the last name +
+      initial. Only fall back to GEO contributor if there is no PMID and the
+      full name cannot be resolved.
     source: fix
-    issues: [9, 223]
-    added: "2026-04-16"
+    issues: [9, 223, 186]
+    updated: "2026-04-19"
 
   - pattern: "Dataset columns: id and name must be first"
     rule: >
@@ -199,7 +208,12 @@ patterns:
       Do not create Synapse projects for:
       1. Re-analysis studies — papers that reprocess existing public GEO/SRA
          data without depositing new primary data. These add no new computable
-         data; instead, check if the original deposited data is already indexed.
+         data. When rejecting a re-analysis paper, extract the original
+         repository accessions mentioned in the paper's data availability
+         statement and write them to `{WORKSPACE_DIR}/reanalysis_originals.json`
+         as seeds for the next run (only if they are not already in the state
+         table). Example format: [{"accession": "GSE12345", "source": "GEO",
+         "from_pmid": "12345678"}].
       2. Summary-only datasets — repositories containing only summary statistics
          (aggregate counts, p-values, coefficient tables) without raw or
          processed primary data. These cannot be meaningfully mined.
@@ -210,7 +224,7 @@ patterns:
       repository has 0 files or only .txt summary tables, access_type=embargoed.
     source: fix
     issues: [194, 235, 233, 246]
-    added: "2026-04-16"
+    updated: "2026-04-19"
 
   - pattern: "GEO TAR archive must be inspected for additional file types"
     rule: >
@@ -258,3 +272,60 @@ patterns:
     source: fix+confirmed
     issues: [216]
     added: "2026-04-16"
+
+  - pattern: "figshare-per-doi-grouping"
+    rule: >
+      When Figshare secondary discovery returns multiple articles (each with its
+      own Figshare article ID) that share the same publication DOI (found in the
+      article's `resource_doi` or `references` fields), they represent individual
+      supplementary data files for ONE paper — do NOT create a separate Synapse
+      project per Figshare article. Instead, group all articles sharing the same
+      publication DOI into a single publication group, each as a separate Dataset
+      within one project.
+      Implementation: after fetching Figshare results, group by `resource_doi`.
+      Articles with no `resource_doi` but the same title prefix may also belong
+      together — check `related_identifiers` for a shared paper DOI.
+    source: fix
+    issues: [203, 204, 205, 206, 207]
+    added: "2026-04-19"
+
+  - pattern: "c57bl6-substrain-precision"
+    rule: >
+      Only use the substrain "C57BL/6J" if the paper or repository metadata
+      explicitly states "C57BL/6J". If the paper says "C57BL/6" without a
+      substrain qualifier, use "C57BL/6" — do not add the J substrain. C57BL/6J
+      refers to a specific Jackson Laboratory colony; using it when unspecified
+      is inaccurate and misleads downstream data consumers comparing across studies.
+    source: fix
+    issues: [125]
+    added: "2026-04-19"
+
+  - pattern: "zero-file-annotations-blocks-completion"
+    rule: >
+      If ANY file entity in a project has zero annotations after Phase 2 gap-fill,
+      the project must NOT be logged as `synapse_created` in the state table.
+      Instead, log it as `error` with the note "zero_annotation_files". Projects
+      with zero-annotation files are unacceptable for human review and will always
+      be sent back for rework.
+      The audit (Step 7a) must detect zero-annotation files and mark them as
+      BLOCKING rather than "HIGH PRIORITY for Phase 2". If Phase 2 completes
+      without annotating these files, log the project as error and move on.
+    source: fix
+    issues: [251, 184, 28]
+    added: "2026-04-19"
+
+  - pattern: "assay-schema-mismatch-is-blocking"
+    rule: >
+      If the schema template bound to a files folder does not match the actual
+      assay type of the files (e.g., an RNA-seq template bound to WGS files, or
+      a bulk-sequencing template bound to single-cell data), flag this as a
+      BLOCKING error in the audit. Do not log the project as `synapse_created`
+      until the correct schema is selected and bound.
+      Detection: compare the `assay` annotation on the files against the schema
+      URI. If the schema name contains "rna" but files have assay="Whole Genome
+      Sequencing", or schema contains "chip" but assay="RNA-seq", that is a
+      mismatch. The audit must rebind the correct schema and re-run validation
+      before clearing the block.
+    source: fix
+    issues: [168, 242]
+    added: "2026-04-19"

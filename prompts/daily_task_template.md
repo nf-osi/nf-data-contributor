@@ -212,7 +212,8 @@ The audit script (code in `prompts/synapse_workflow.md`):
   - `resourceStatus` or `filename` annotations on File entities → remove
   - Source Metadata/ folder is empty → flag for Phase 2 population
   - Dataset name is non-descriptive (just an accession code) → flag for Phase 2 rename
-  - Any File entity has zero annotations → flag as HIGH PRIORITY for Phase 2 full annotation pass
+  - Any File entity has zero annotations → **BLOCKING ERROR**: mark project with `zero_annotation_error` in audit_results.json; do NOT log as `synapse_created` until all files have at least minimal annotations. Phase 2 must resolve before the project can be logged.
+  - Schema template URI does not match the assay type annotated on the files (e.g., schema name contains "rna" but files have assay="Whole Genome Sequencing") → **BLOCKING ERROR**: mark project with `schema_mismatch_error`; rebind the correct schema and re-validate before clearing the block.
 - **Collects context** for issues that require reasoning (annotation fields that need domain knowledge)
 - Prints a structured report and writes `{WORKSPACE_DIR}/audit_results.json`
 
@@ -294,7 +295,11 @@ If running in GitHub Actions, `GITHUB_TOKEN` and `GITHUB_REPOSITORY` are set aut
 
 ## Step 9 — Update State Tables
 
-Write and run `{WORKSPACE_DIR}/update_state.py`. Record every accession evaluated. Append run summary row. Print:
+Write and run `{WORKSPACE_DIR}/update_state.py`. Record every accession evaluated. Append run summary row.
+
+If `{WORKSPACE_DIR}/reanalysis_originals.json` exists (written by the scoring step when re-analysis papers were rejected), check each listed accession against the state table. For any accession not already processed, log it as a `discovered` entry so it will be picked up as a seed candidate on the next run.
+
+Print:
 
 ```
 === NADIA — Run Complete ===
