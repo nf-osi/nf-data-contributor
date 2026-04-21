@@ -153,6 +153,10 @@ Zenodo, Figshare, OSF, ArrayExpress, PRIDE, MetaboLights, Mendeley Data, NCI PDC
 DataCite API, MassIVE, NCI GDC, Cell Image Library
   → query with keywords from config/keywords.yaml
   → SKIP any result with a PMID already found in the primary path
+  → For Figshare: after fetching results, group articles by resource_doi.
+    Multiple Figshare articles sharing the same resource_doi (publication DOI)
+    are individual supplementary data files for ONE paper — combine them into
+    a single publication group with multiple datasets, not separate projects.
 ```
 
 ### Key API Patterns
@@ -497,7 +501,7 @@ with open(f'{WORKSPACE_DIR}/scored.json', 'w') as f:
 **Thresholds:** minimum score 0.70, must be primary data, minimum 3 samples (if known), access must be `open` or `controlled` (skip `embargoed`).
 
 **Reject these regardless of relevance score:**
-- **Re-analysis studies** — the paper reprocesses existing public GEO/SRA/TCGA data without depositing new primary data. Signal: paper says "we downloaded from GEO/TCGA", no new repository accession for this paper. Action: skip; separately check if the original data is already indexed.
+- **Re-analysis studies** — the paper reprocesses existing public GEO/SRA/TCGA data without depositing new primary data. Signal: paper says "we downloaded from GEO/TCGA", no new repository accession for this paper. Action: skip; extract the original repository accessions mentioned in the paper's data availability statement or methods section, and write them to `{WORKSPACE_DIR}/reanalysis_originals.json` (format: `[{"accession": "GSE12345", "source": "GEO", "from_pmid": "..."}]`). These are checked against the state table at run end and queued as seeds for the next run if not already processed.
 - **Summary-only datasets** — repository contains only aggregate statistics (p-value tables, coefficient files, summary TSVs) with no raw or processed primary data files. Signal: all files are `.txt` summary tables; no FASTQ/BAM/count matrix/raw data.
 - **Stub/empty repositories** — repository record exists but no data files are deposited yet. Signal: OSF with 0 files, Zenodo draft not published, embargoed with no accessible files.
 - **Out-of-scope disease context** — the paper's connection to the target disease is only through somatic mutation in a general cancer cohort, with no germline disease connection. Treat this carefully — see Standard 13 for specific guidance on disease annotation.
@@ -688,11 +692,11 @@ Applying the wrong template (e.g., an RNA-seq schema to chromatin accessibility 
 
 When setting disease-focus or diagnosis annotations, distinguish between germline disease (the patient or organism genetically carries the disease) and somatic mutation in a disease-naive background:
 
-- **Germline disease** — patient has the disease by diagnosis, or the model organism carries a germline mutation (e.g., `Nf1+/-` mouse model, NF1 patient biopsy, NF2 patient tumor). → Use the disease annotation (e.g., NF1, NF2, schwannomatosis).
-- **Somatic mutation only** — cancer cell line with an acquired somatic NF1/NF2 loss, TCGA tumor that happens to carry an NF1 mutation, or general cancer cohort where NF1 loss is one of many driver events. → Use the appropriate cancer type annotation; **do not** add the germline disease annotation.
+- **Germline disease** — patient has the disease by diagnosis, or the model organism carries a germline mutation (e.g., `Nf1+/-` mouse model, NF1 patient biopsy, NF2 patient tumor, schwannomatosis patient with germline SMARCB1 loss). → Use the disease annotation (e.g., NF1, NF2, schwannomatosis).
+- **Somatic mutation only** — cancer cell line with an acquired somatic NF1/NF2/SMARCB1 loss, TCGA tumor that happens to carry an NF1 mutation, renal medullary carcinoma with somatic SMARCB1 loss in a non-schwannomatosis patient, or general cancer cohort where disease-gene loss is one of many driver events. → Use the appropriate cancer type annotation; **do not** add the germline disease annotation.
 
 **Determining which applies:**
-1. Check whether the study explicitly recruits NF patients or uses NF patient specimens.
+1. Check whether the study explicitly recruits patients with the hereditary syndrome or uses specimens from diagnosed patients.
 2. Check model organism genotype: `Nf1+/-` (heterozygous germline) = germline model; `NF1 siRNA knockdown in MCF-7` = somatic model.
 3. When uncertain, use the specific tumor/cancer type annotation and flag for human review.
 
