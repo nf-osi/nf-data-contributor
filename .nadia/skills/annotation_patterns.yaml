@@ -273,6 +273,40 @@ patterns:
     issues: [216]
     added: "2026-04-16"
 
+  - pattern: "nf1Genotype for knockdown vs knockout"
+    rule: >
+      The nf1Genotype field reflects the actual DNA genotype, not the functional
+      perturbation level:
+      - siRNA / shRNA / RNAi knockdown: DNA sequence is unchanged → nf1Genotype = '+/+'
+        (even though NF1 protein/mRNA is reduced, both alleles are still present)
+      - CRISPR knockout: typically biallelic frameshift → nf1Genotype = '-/-'
+        (CRISPR almost always creates true null alleles in both copies)
+      - Heterozygous CRISPR or germline Nf1+/- model: nf1Genotype = '+/-'
+      - Wild-type controls in any experiment: nf1Genotype = '+/+'
+      Set the value from BioSample genotype attribute; if the genotype field says
+      'NF1KO' or 'NF1 knockout' without specifying zygosity, default to '-/-'.
+    source: fix
+    issues: [226]
+    added: "2026-04-16"
+
+  - pattern: "full text fallback: Unpaywall → Semantic Scholar when not in PMC"
+    rule: >
+      When fetching paper methods text for Tier 2 / Tier 3 gap-fill:
+      always use fetch_paper_methods_text(pmid, doi, email) — not fetch_pmc_methods().
+      The wrapper tries three sources in order:
+        1. PMC full-text XML (free, structured, best quality)
+        2. Unpaywall OA PDF (get_unpaywall_oa_url(doi, email) → download → extract text)
+        3. Semantic Scholar abstract + tldr (get_semantic_scholar_tldr(doi))
+      Most subscription papers have an OA version indexed by Unpaywall (preprint, author
+      manuscript, gold OA). Roughly 50–60% of biomedical papers that are NOT in PMC still
+      have an Unpaywall OA location. Only after all three sources fail should a paper be
+      declared programmatically inaccessible — at which point, flag with the specific reason
+      (e.g., "Elsevier user license — HTTP 403" or "subscription only").
+      Do NOT stop at "not in PMC" and declare the paper inaccessible.
+    source: fix
+    issues: []
+    added: "2026-04-16"
+
   - pattern: "figshare-per-doi-grouping"
     rule: >
       When Figshare secondary discovery returns multiple articles (each with its

@@ -54,7 +54,7 @@ Fields describing how sequencing was performed: assay type, library preparation,
 1. ENA filereport TSV (columns: `library_strategy`, `library_source`, `library_selection`, `library_layout`, `instrument_model`, `read_count`, `base_count`, `nominal_length`, `nominal_sdev`)
 2. GEO SOFT `!Series_library_strategy`, `!Series_library_selection`, `!Sample_instrument_model`, `!Sample_library_source`, `!Sample_extract_protocol_ch1`
 3. SRA RunInfo (same fields, alternate form)
-4. PubMed/PMC methods section — search for kit names, instrument names, protocol keywords
+4. `fetch_paper_methods_text(pmid, doi, email)` — PMC → Unpaywall → Semantic Scholar; search for kit names, instrument names, protocol keywords
 5. Repository experiment descriptions (ArrayExpress SDRF `Protocol REF` column; PRIDE project XML)
 6. FASTQ header parsing (instrument and run info from first read header)
 7. BAM @RG tag (`PL` = platform, `LB` = library, `PU` = platform unit, `CN` = sequencing center)
@@ -69,7 +69,7 @@ Fields describing the biological sample: organism/species, sex, age, tissue, cel
 4. SRA BioSample XML attributes (same data, alternate form)
 5. **Paper tables and supplementary files** — download and parse all supplementary files (see `fetch_geo_supplementary_files` + `try_download_and_parse_table` in Source Tier 2) and fetch PMC full text to scan main-text tables. **This is mandatory, not optional.** Fields like `sex`, `age`, `diagnosis`, `genotype`, and `treatment` are routinely absent from GEO/ENA sample records but present somewhere in the paper — in any supplementary table, a main-text cohort table, the results section, or the methods section. "Not in GEO metadata" is not a stopping condition — always search the paper before declaring a field unresolvable.
 6. PubMed abstract — extract disease terms, organism, tissue, cell type via reasoning
-7. PMC full text methods section — sex, age, genotype, treatment, dissociation protocol
+7. `fetch_paper_methods_text(pmid, doi, email)` — tries PMC full text first, then Unpaywall OA PDF, then Semantic Scholar; returns methods text for sex, age, genotype, treatment, dissociation protocol
 8. Data file inspection — h5ad/loom `obs` columns contain per-cell/per-sample annotations (see Source Tier 4)
 
 > **Never flag `sex`, `age`, `diagnosis`, `genotype`, or `treatment` for human review without first attempting supplementary table download.** These are the most commonly under-annotated fields in GEO/ENA records and the most commonly present in paper supplementary tables. A curation comment that says "sex not in GEO metadata" without having attempted the supplementary tables is an incomplete gap-fill.
@@ -102,7 +102,7 @@ Fields specific to mouse models, cell lines, organoids: model species, model sex
 2. BioSample attributes — `strain`, `genotype`, `sex`, `age` attributes
 3. ENA sample `sample_attribute` XML records (via `https://www.ebi.ac.uk/ena/browser/api/xml/{sample_accession}`)
 4. Paper abstract / methods — named mouse model (e.g. "Nf1fl/fl; GFAP-Cre"), cell line name, organoid protocol
-5. PMC full text — Methods section describes experimental system in detail
+5. `fetch_paper_methods_text(pmid, doi, email)` — tries PMC → Unpaywall → Semantic Scholar; Methods section describes experimental system in detail
 6. Supplementary tables — sample manifests often list genotype per mouse
 7. Paper figures / supplementary figures — genotype labels on experimental groups (extract from figure legends if full text available)
 
@@ -233,14 +233,67 @@ def map_file_to_gsm(filename: str, geo_samples: dict, sra_run_to_gsm: dict) -> s
 
 ## Source Tier 2 — Publication Metadata
 
-### PMC full text — methods section extraction
+### Paper full text — methods section extraction (PMC → Unpaywall → Semantic Scholar)
+
+Use `fetch_paper_methods_text()` as the single entry point. It tries three sources in priority order and returns the first non-empty result. Never call the individual helpers directly unless you specifically need only one source.
 
 ```python
-import httpx, re
+import httpx, re, xml.etree.ElementTree as ET
 
-def fetch_pmc_methods(pmid: str) -> str:
-    """Fetch PMC full text methods section (open-access articles only)."""
-    # First resolve PMID → PMCID
+def fetch_paper_methods_text(pmid: str, doi: str = '', contact_email: str = '') -> str:
+    """
+    Fetch paper methods text from the best available open-access source.
+    Tries in order: (1) PMC full text XML, (2) Unpaywall OA PDF, (3) Semantic Scholar.
+    Returns up to 10 000 characters of methods/abstract text, or '' if all fail.
+    """
+    # --- Source 1: PMC full text XML ---
+    text = _fetch_pmc_methods(pmid)
+    if text:
+        return text
+
+    # --- Source 2: Unpaywall open-access PDF ---
+    if doi and contact_email:
+        oa_url = get_unpaywall_oa_url(doi, contact_email)
+        if oa_url:
+            try:
+                pdf_resp = httpx.get(oa_url, timeout=30, follow_redirects=True)
+                if pdf_resp.status_code == 200:
+                    # Extract plain text from PDF bytes using pdfminer / pypdf if available,
+                    # otherwise fall back to basic text extraction.
+                    try:
+                        import io
+                        try:
+                            from pdfminer.high_level import extract_text as pdfminer_extract
+                            pdf_text = pdfminer_extract(io.BytesIO(pdf_resp.content))
+                        except ImportError:
+                            try:
+                                import pypdf
+                                reader = pypdf.PdfReader(io.BytesIO(pdf_resp.content))
+                                pdf_text = '\n'.join(p.extract_text() or '' for p in reader.pages)
+                            except ImportError:
+                                pdf_text = ''
+                        if pdf_text.strip():
+                            # Trim to methods-relevant portion if possible
+                            methods_idx = pdf_text.lower().find('method')
+                            start = max(0, methods_idx - 200) if methods_idx >= 0 else 0
+                            return pdf_text[start:start + 10000]
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+    # --- Source 3: Semantic Scholar (abstract + tldr when PDF unavailable) ---
+    if doi:
+        ss = get_semantic_scholar_tldr(doi)
+        combined = ' '.join(filter(None, [ss.get('abstract', ''), ss.get('tldr', '')]))
+        if combined.strip():
+            return combined[:10000]
+
+    return ''  # All sources exhausted
+
+
+def _fetch_pmc_methods(pmid: str) -> str:
+    """Internal: fetch PMC full text methods section. Returns '' when not in PMC."""
     resp = httpx.get(
         'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/elink.fcgi',
         params={'dbfrom': 'pubmed', 'db': 'pmc', 'id': pmid, 'retmode': 'json'},
@@ -255,10 +308,9 @@ def fetch_pmc_methods(pmid: str) -> str:
             if ldb.get('dbto') == 'pmc':
                 pmc_ids = ldb.get('links', [])
     if not pmc_ids:
-        return ''  # Not in PMC (most clinical/controlled studies aren't)
+        return ''  # Not in PMC — caller will try Unpaywall and Semantic Scholar
     pmcid = f"PMC{pmc_ids[0]}"
 
-    # Fetch full text XML
     resp2 = httpx.get(
         'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi',
         params={'db': 'pmc', 'id': pmcid, 'rettype': 'xml', 'retmode': 'xml'},
@@ -266,15 +318,13 @@ def fetch_pmc_methods(pmid: str) -> str:
     )
     if resp2.status_code != 200:
         return ''
-
-    # Extract all <sec> elements containing "method" in the title
     root = ET.fromstring(resp2.text)
     methods_text = []
     for sec in root.iter('sec'):
         title = sec.findtext('title', '').lower()
         if any(kw in title for kw in ('method', 'material', 'procedure', 'protocol', 'experiment')):
             methods_text.append(' '.join(sec.itertext()))
-    return ' '.join(methods_text)[:10000]  # cap at 10k chars to stay in context
+    return ' '.join(methods_text)[:10000]
 ```
 
 ### Supplementary tables from GEO or publisher
@@ -408,7 +458,11 @@ def get_semantic_scholar_tldr(doi: str) -> dict:
     # pdf_url is a direct open-access PDF link when available — fetch and parse for methods text
 ```
 
-> **When PMC returns no full text and Unpaywall returns no OA location:** the paper may still be programmatically inaccessible even if it appears readable in a browser (institutional access, publisher "free to read" walls that block bots). Try Semantic Scholar as a last resort. If that also fails, flag the field for human review with an explicit note: *"paper appears accessible via institutional subscription but full text is not programmatically available — age/sex require a human with journal access to populate."*
+> **When PMC returns no full text and Unpaywall returns no OA location:** the paper may still be programmatically inaccessible even if it appears readable in a browser. Two distinct cases:
+> - **Elsevier "user license" OA** — papers published OA under the Elsevier user license ([https://www.elsevier.com/about/policies-and-standards/open-access-licenses/elsevier-user](https://www.elsevier.com/about/policies-and-standards/open-access-licenses/elsevier-user)) are free to read for humans but ScienceDirect returns HTTP 403 to bots. Unpaywall may incorrectly report these as `oa_status: closed`. The Elsevier TDM API also does not cover this license type. Try Semantic Scholar; if the abstract is available there, extract what you can. Flag remaining gaps with: *"paper is OA under Elsevier user license but ScienceDirect blocks programmatic access (HTTP 403); full text not available."*
+> - **Institutional/subscription access** — genuinely behind a paywall. Flag with: *"paper is behind a paywall and full text is not programmatically available."*
+>
+> In both cases, try Semantic Scholar as a last resort. If all fail, flag for human review with the appropriate note above.
 
 ```python
 def get_unpaywall_oa_url(doi: str, contact_email: str) -> str | None:
@@ -437,7 +491,7 @@ When structured sources don't yield a value, extract from free text using agent 
 
 1. **Abstract** (PubMed, already fetched): Contains disease focus, organism, broad tissue type, study design keywords. Good for: schema fields capturing disease state, organism/species, tissue type, data modality — verify any assay-type field against the structured `library_strategy` column before applying.
 
-2. **Methods section** (PMC or Unpaywall PDF text): Contains library preparation kit names, instrument model, dissociation protocol (for scRNA-seq), centrifuge speeds (hints at specimen type), age range, sex breakdown. Good for: schema fields capturing library preparation method, dissociation method, specimen preparation, sequencing instrument/platform, age/age-unit ranges, sex distribution.
+2. **Methods section** (`fetch_paper_methods_text(pmid, doi, email)` — tries PMC, then Unpaywall, then Semantic Scholar): Contains library preparation kit names, instrument model, dissociation protocol (for scRNA-seq), centrifuge speeds (hints at specimen type), age range, sex breakdown. Good for: schema fields capturing library preparation method, dissociation method, specimen preparation, sequencing instrument/platform, age/age-unit ranges, sex distribution.
 
 3. **Supplementary table rows** (already fetched above): Often the ground truth for per-sample annotations. Good for: schema fields capturing per-sample identifiers, demographics (sex, age, age unit), disease/diagnosis classification, tumor type, genotype or model system identity, treatment or experimental condition.
 
