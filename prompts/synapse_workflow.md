@@ -864,7 +864,11 @@ def make_wiki_content(pub_title, disease_focus, assay_types, species, tissue_typ
         for r in datasets_table_rows
     )
 
-    return f"""## {pub_title}
+    return f"""> **Auto-discovery notice:** This project was automatically discovered and provisioned by [NADIA](https://github.com/nf-osi/nadia). It is pending data manager review.
+
+---
+
+## {pub_title}
 
 **Disease Focus:** {', '.join(disease_focus)}
 **Assay Type:** {', '.join(assay_types)}

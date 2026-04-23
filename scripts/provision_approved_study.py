@@ -577,15 +577,18 @@ APPROVED_FOOTER = (
 def step8_update_wiki_footer(syn, project_id):
     """Replace the pending-review footer in the project wiki with the approved footer.
 
-    Before: *This project was ingested automatically by @nadia-bot on {date} and is pending data manager review.*
+    The auto-discovery banner at the top is intentionally preserved after approval.
+
+    Before: *This project was auto-curated by [NADIA]... and is pending data manager review.*
     After:  *Auto-curated by [@nadia-bot](...) and reviewed by NF-OSI.*
     """
     import re
     try:
         wiki = syn.restGET(f"/entity/{project_id}/wiki")
         markdown = wiki.get("markdown", "")
+        # Replace the pending-review footer (matches both old and new NADIA footer formats)
         new_markdown = re.sub(
-            r"\*This project was ingested automatically by @nadia-bot[^\n]*\*",
+            r'\*This project was (?:ingested automatically by @nadia-bot|auto-curated by \[NADIA\][^\n]*? and is pending data manager review)\.[^\n]*\*',
             APPROVED_FOOTER,
             markdown,
         )
