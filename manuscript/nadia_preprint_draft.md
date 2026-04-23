@@ -142,6 +142,3 @@ We thank the NF-OSI data management team for human review of NADIA-curated entri
 
 [TBD — NF portal-supporting grants]
 
-## Ethics Statement
-
-No human subjects research was conducted. All datasets indexed by NADIA were previously deposited in public repositories and were accessed in accordance with the terms of those repositories.
