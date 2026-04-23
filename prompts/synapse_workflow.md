@@ -1193,6 +1193,10 @@ These issues were discovered when the audit was run on real agent-created projec
 
 19. **Schema completeness check at audit time** — Phase 2 (agent reasoning) must include an explicit schema coverage step: call `fetch_schema_properties(schema_uri)` on the bound schema, list every property that is missing from each file's annotations, and for each missing property attempt to resolve it from the file's per-sample source metadata. Properties that cannot be resolved must be documented in the GitHub curation comment under a "fields not populated" section with the reason. The audit output (`audit_results.json`) must include a `missing_schema_fields` list per project. → Standards 5, 11
 
+18. **`dataset_ids_to_snapshot` must always be populated in Phase 2 output** — Every entry in `audit_reasoning_fixes.json` must include a `dataset_ids_to_snapshot` list with all dataset IDs from that project, even when there are no other annotation gaps. Phase 3 only mints stable versions for datasets explicitly listed here. Omitting this list means NO version is ever minted, and the dataset remains an unversioned live entity in the portal. When writing `audit_reasoning_fixes.json`, always include all datasets — even for projects that needed no other fixes.
+
+19. **Dataset columns must start with `id` and `name` system columns** — Data managers expect the Dataset view column order: entity ID (`id`, type ENTITYID), filename (`name`, type STRING), then all annotation columns. Create both system columns via `POST /column` and prepend their IDs to `columnIds` before all annotation column IDs. Datasets created without these system columns show no identifier or filename in the view. The audit Phase 1 fixes missing `columnIds` by re-creating them with system columns first.
+
 ### `created_projects.json` Schema (output of Step 6, input to audit)
 
 Step 6 must write this file. The audit reads it:
@@ -1520,6 +1524,21 @@ for proj in created:
                     if not _scalar(ann_dict.get(field, '')):
                         file_gap['gaps'].append(f'{field} missing')
 
+                # modelSystemName — required for all non-human-species files
+                cur_species = _scalar(ann_dict.get('species', ''))
+                MODEL_ORG_KEYWORDS = ('mus musculus', 'mouse', 'rattus', 'rat', 'drosophila',
+                                      'danio rerio', 'zebrafish', 'caenorhabditis', 'xenopus')
+                if cur_species and any(k in cur_species.lower() for k in MODEL_ORG_KEYWORDS):
+                    if not _scalar(ann_dict.get('modelSystemName', '')):
+                        file_gap['gaps'].append('modelSystemName missing (required for model organism studies)')
+
+                # assayTarget — required for ChIP-seq, CUT&RUN, ATAC-seq
+                cur_assay = _scalar(ann_dict.get('assay', ''))
+                ASSAY_TARGET_ASSAYS = ('chip-seq', 'chip seq', 'cut&run', 'cut&tag', 'atac-seq', 'atac seq')
+                if cur_assay and any(k in cur_assay.lower() for k in ASSAY_TARGET_ASSAYS):
+                    if not _scalar(ann_dict.get('assayTarget', '')):
+                        file_gap['gaps'].append('assayTarget missing (required for ChIP-seq/CUT&RUN/ATAC-seq)')
+
                 if changed:
                     syn.store(fe)
                     result['fixes_applied'].append(
@@ -1730,6 +1749,45 @@ for proj in created:
                     print(f"    Schema: FIXED — bound {schema_uri}")
             except Exception as e:
                 result['warnings'].append(f'{acc}: Schema binding failed: {e}')
+
+    # 5. Delete stray empty folders (e.g. Analysis/ left from creation bugs)
+    STRUCTURAL_FOLDER_NAMES = {'Raw Data', 'Source Metadata'}
+    try:
+        for child in syn.getChildren(project_id, includeTypes=['folder']):
+            if child['name'] in STRUCTURAL_FOLDER_NAMES:
+                continue  # these may be legitimately empty while populating
+            try:
+                sub_children = list(syn.getChildren(child['id']))
+                if not sub_children:
+                    syn.delete(child['id'])
+                    result['fixes_applied'].append(f"Empty folder '{child['name']}' deleted")
+                    print(f"  Empty folder '{child['name']}': DELETED")
+            except Exception as e2:
+                result['warnings'].append(f"Could not check/delete folder '{child['name']}': {e2}")
+    except Exception as e:
+        result['warnings'].append(f'Empty folder check failed: {e}')
+
+    # 6. Dataset name readability check
+    for ds in datasets:
+        dataset_id = ds.get('dataset_id', '')
+        acc        = ds.get('accession_id', '')
+        repo       = ds.get('source_repository', '')
+        if dataset_id:
+            try:
+                ds_ent = syn.restGET(f'/entity/{dataset_id}')
+                ds_name = ds_ent.get('name', '')
+                # Flag names that look like the bare accession pattern (not human-readable)
+                import re as _re
+                if _re.match(r'^[A-Za-z]+_[A-Za-z0-9]+$', ds_name) or ds_name == f'{repo}_{acc}':
+                    result['reasoning_gaps'].append({
+                        'scope': 'dataset_name',
+                        'dataset_id': dataset_id,
+                        'current_name': ds_name,
+                        'field': 'dataset_name',
+                    })
+                    print(f"    Dataset name '{ds_name}': flagged as non-human-readable")
+            except Exception as e:
+                result['warnings'].append(f'Dataset name check failed: {e}')
 
     # Per-project summary
     n_fixes = len(result['fixes_applied'])

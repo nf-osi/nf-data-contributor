@@ -574,6 +574,12 @@ The schema tells you:
 - Which fields have controlled vocabularies (enums) — only set valid enum values
 - Which fields apply to specific assay types or study conditions (check all schema properties, not just a subset)
 
+> **Dataset column order is: `id` | `name` | annotation columns.** Create `{'name': 'id', 'columnType': 'ENTITYID'}` and `{'name': 'name', 'columnType': 'STRING', 'maximumSize': 256}` via `POST /column` and prepend their IDs to `columnIds` before all annotation column IDs. Without system columns first, the Dataset view shows no identifier or filename.
+
+> **Stable Dataset versions must be minted in audit Phase 3, not at creation time.** Every project's entry in `audit_reasoning_fixes.json` must include `dataset_ids_to_snapshot` with ALL dataset IDs from that project — even projects with no annotation gaps. Phase 3 (`apply_audit_fixes.py`) mints the version only for datasets listed there. A dataset without a stable version cannot be reliably cited.
+
+**Only set enum values that exist in the schema** — fetch at runtime from `https://repo-prod.prod.sagebase.org/repo/v1/schema/type/registered/{schema_uri}`.
+
 When populating schema fields, the Annotation Quality Standards apply (see section below). In particular:
 - Organism/taxon fields: read from repository source, never infer
 - Instrument/technology fields: use the exact model name from source, not a vendor category
@@ -937,12 +943,14 @@ Before logging `synapse_created` or `dataset_added`, verify:
 - [ ] Any file-format/extension field strips compression suffixes before storing (e.g. `fastq.gz` → `fastq`, `txt.gz` → `txt`)
 - [ ] Per-sample identifier fields contain a unique value per file — not a shared value copied to all files
 - [ ] No file has a zip-extraction flag as its only/final annotation
+- [ ] For model organism studies: `modelSystemName` set on all files (fetch strain/line from GEO GSM characteristics or SRA BioSample attributes)
+- [ ] For ChIP-seq/CUT&RUN/ATAC-seq: `assayTarget` set on all files
 - [ ] Dataset entity (`org.sagebionetworks.repo.model.table.Dataset`) is a **direct child of the project** (not inside Raw Data or any subfolder)
 - [ ] Dataset entity name is specific and informative — see naming guidance in `prompts/synapse_workflow.md`
 - [ ] Dataset entity `items` populated with all File entity IDs
-- [ ] Dataset entity `columnIds` derived dynamically from the actual annotation keys on the files in this dataset (see Step 4 in `prompts/synapse_workflow.md`) — do not use a hardcoded list
+- [ ] Dataset entity `columnIds` starts with system `id` (ENTITYID) and `name` (STRING) columns, then all annotation columns — data managers expect column order: id | name | annotations
 - [ ] All fields in `curation_checklist.required_dataset_annotations` set on the Dataset entity
-- [ ] Stable version minted on Dataset entity via `POST /entity/{id}/version`
+- [ ] Stable version minted on Dataset entity via `POST /entity/{id}/version` **after all annotation fixes are applied** (Phase 3, not creation)
 - [ ] Metadata schema bound to the **files folder** (not the Dataset entity, not the project) via `bind_json_schema(schema_uri, files_folder_id)`
 - [ ] Schema binding verified
 - [ ] No empty folders exist in the project
