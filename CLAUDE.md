@@ -523,6 +523,8 @@ def safe_project_name(title: str, max_len: int = 250) -> str:
 
 **Sanitize slashes and colons** in project names: `title.replace(':', '-').replace('/', '-')`
 
+> **Critical:** The project name MUST be the publication title — never a repository record title, a shortened description, or a repository-derived phrase like "Spatial transcriptomic analysis of X". Repository record titles describe only the data deposit, not the study. If no publication has been found yet for a repository-direct candidate, you must attempt to resolve the publication first (see "Before Creating Any Project" section below). Using a repository record title as the project name creates projects that cannot be matched back to their publication and require manual renaming by data managers. If a publication genuinely cannot be found, use the repository title and explicitly document this in the wiki and GitHub issue.
+
 ### Folder Hierarchy
 
 ```
@@ -606,6 +608,11 @@ Before writing any annotation, call `fetch_schema_properties(schema_uri)` to ret
 **If a field's enum list is empty (`"enum": []`), do not set that field at all — an empty enum means no valid value exists for it in the current schema version.** Setting a field with no valid enum values will always fail validation.
 
 **Config-provided vocabulary lists can lag the live portal.** For any controlled-vocabulary annotation (disease manifestation, disease focus, data type, etc.), verify current valid values by querying the live Synapse portal table at runtime rather than relying solely on values from `config/settings.yaml`. The portal table is authoritative; config values are a convenience cache that may be stale.
+
+**Enum values are exact, including Unicode characters.** Schema controlled vocabularies may contain cell line names or biological terms with Unicode characters (Greek letters λ, α, β; subscripts; special punctuation). `HSC1λ` (lambda) ≠ `HSC1L` (letter L). When matching source metadata to schema enums:
+- Always compare character-for-character against values returned by `fetch_schema_properties()`
+- If source metadata uses an ASCII approximation (e.g. "HSC1L" for a cell line whose schema name is "HSC1λ"), scan the full enum list for a Unicode variant before concluding there is no match
+- Flag any near-match approximations in the GitHub curation comment
 
 ### 2 — Instrument/technology fields: use exact values from the source repository
 
@@ -707,6 +714,26 @@ When setting disease-focus or diagnosis annotations, distinguish between germlin
 3. When uncertain, use the specific tumor/cancer type annotation and flag for human review.
 
 This distinction matters because portal data consumers use disease annotations to find data relevant to patients with inherited conditions — mixing in somatic cancer data produces misleading search results.
+
+### 12 — Normal and control samples: do not assign tumor type from disease search context
+
+`tumorType` and `diagnosis` must reflect what the biological sample **actually is** — not the disease that motivates the study. Datasets in disease-focused repositories often include normal controls, immortalized healthy cell lines, and pre-malignant samples alongside tumor samples. Misclassifying these corrupts portal search and filters.
+
+**Before setting `tumorType` or `diagnosis`:** read the paper's Materials and Methods to understand the cell line or tissue source. Ask: "Was this sample isolated from a tumor, or is it a healthy/control/engineered sample?"
+
+Samples that must **NOT** receive a tumor-type annotation:
+- Immortalized normal cell lines used as research tools, even if they carry a disease-gene knockout (e.g., a Schwann cell line with NF1 knockout is a *normal* cell — not an MPNST)
+- Healthy donor samples used as controls in a disease study
+- iPSCs or pluripotent cell lines, unless explicitly described as disease-affected and phenotypically abnormal
+- Benign tumors or pre-malignant lesions when the study question is malignant transformation risk — a benign neurofibroma is **not** an MPNST
+
+If a sample is normal or control: leave `tumorType` unset (or use the closest schema enum value for non-tumor status if one exists). Document the reasoning in the GitHub curation comment.
+
+### 13 — File enumeration completeness: a landing-page link is not a complete dataset
+
+The goal of file creation is to link individual downloadable files, not repository landing pages. If `get_file_list_*` returned empty and the fallback to a landing-page `ExternalLink` was used, that project is **incomplete**. The audit must flag it; the GitHub curation comment must include it under "Items for human review" with the label `file-enumeration-required`.
+
+Do **not** log such a project as `synapse_created` without flagging the incomplete file enumeration. Data managers need to know that the project points to a landing page, not to data.
 
 ---
 

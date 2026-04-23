@@ -1193,9 +1193,13 @@ These issues were discovered when the audit was run on real agent-created projec
 
 19. **Schema completeness check at audit time** — Phase 2 (agent reasoning) must include an explicit schema coverage step: call `fetch_schema_properties(schema_uri)` on the bound schema, list every property that is missing from each file's annotations, and for each missing property attempt to resolve it from the file's per-sample source metadata. Properties that cannot be resolved must be documented in the GitHub curation comment under a "fields not populated" section with the reason. The audit output (`audit_results.json`) must include a `missing_schema_fields` list per project. → Standards 5, 11
 
-18. **`dataset_ids_to_snapshot` must always be populated in Phase 2 output** — Every entry in `audit_reasoning_fixes.json` must include a `dataset_ids_to_snapshot` list with all dataset IDs from that project, even when there are no other annotation gaps. Phase 3 only mints stable versions for datasets explicitly listed here. Omitting this list means NO version is ever minted, and the dataset remains an unversioned live entity in the portal. When writing `audit_reasoning_fixes.json`, always include all datasets — even for projects that needed no other fixes.
+20. **`dataset_ids_to_snapshot` must always be populated in Phase 2 output** — Every entry in `audit_reasoning_fixes.json` must include a `dataset_ids_to_snapshot` list with all dataset IDs from that project, even when there are no other annotation gaps. Phase 3 only mints stable versions for datasets explicitly listed here. Omitting this list means NO version is ever minted, and the dataset remains an unversioned live entity in the portal. When writing `audit_reasoning_fixes.json`, always include all datasets — even for projects that needed no other fixes.
 
-19. **Dataset columns must start with `id` and `name` system columns** — Data managers expect the Dataset view column order: entity ID (`id`, type ENTITYID), filename (`name`, type STRING), then all annotation columns. Create both system columns via `POST /column` and prepend their IDs to `columnIds` before all annotation column IDs. Datasets created without these system columns show no identifier or filename in the view. The audit Phase 1 fixes missing `columnIds` by re-creating them with system columns first.
+21. **Dataset columns must start with `id` and `name` system columns** — Data managers expect the Dataset view column order: entity ID (`id`, type ENTITYID), filename (`name`, type STRING), then all annotation columns. Create both system columns via `POST /column` and prepend their IDs to `columnIds` before all annotation column IDs. Datasets created without these system columns show no identifier or filename in the view. The audit Phase 1 fixes missing `columnIds` by re-creating them with system columns first.
+
+22. **Files folder containing only a landing-page link** — When `get_file_list_*` returns empty and the fallback to a single landing-page ExternalLink is used, the project is incomplete. Phase 1 detects this by checking if a files folder has exactly one file whose URL contains no recognizable file extension and matches a landing-page pattern (`acc.cgi`, `dataset.jsp`, `/records/`, `/record/`, etc.). Flag with a `landing_page_fallback` warning in `audit_results.json` and add `file-enumeration-required` to the GitHub curation comment under "Items for human review". Do NOT suppress or auto-fix this — it requires a human to trigger re-enumeration or manually link files. → Standard 13
+
+23. **Dataset stable version must be minted after all annotation fixes** — After Phase 3 applies all annotation fixes, Phase 1 (on a re-run) checks whether each Dataset entity has a stable snapshot version (any version with a label). If not, mint one with `POST /entity/{dataset_id}/version`. The version is the permanent citable record — data managers will explicitly request it if missing. Always mint after annotation corrections are complete, not before. → Lesson 17
 
 ### `created_projects.json` Schema (output of Step 6, input to audit)
 
@@ -1434,6 +1438,35 @@ for proj in created:
             print(f"    Files: {len(file_children)}")
             if len(file_children) == 0:
                 result['warnings'].append(f'{acc}: 0 files in {files_folder_id}')
+            elif len(file_children) == 1:
+                # Detect landing-page fallback: a single file whose URL looks like a
+                # repository landing page rather than a direct download link.
+                LANDING_PAGE_PATTERNS = (
+                    'acc.cgi', 'dataset.jsp', '/records/', '/record/', 'view/detail',
+                    'study.cgi', 'ProteoSAFe/dataset', 'cellimagelibrary.org/image_group',
+                )
+                try:
+                    sole_file = syn.get(file_children[0]['id'], downloadFile=False)
+                    sole_url  = getattr(sole_file, 'externalURL', '') or ''
+                    if not sole_url:
+                        # Check path attribute for ExternalLink-style files
+                        sole_url = getattr(sole_file, '_file_handle', {}).get('externalURL', '') or ''
+                    import urllib.parse, posixpath
+                    parsed   = urllib.parse.urlparse(sole_url)
+                    path_ext = posixpath.splitext(parsed.path)[1].lstrip('.').lower()
+                    is_landing = (
+                        any(pat in sole_url for pat in LANDING_PAGE_PATTERNS)
+                        or (not path_ext and sole_url)  # URL with no file extension
+                    )
+                    if is_landing:
+                        result['warnings'].append(
+                            f'{acc}: LANDING_PAGE_FALLBACK — files folder contains only a '
+                            f'landing-page link ({sole_url[:120]}). '
+                            f'File enumeration is incomplete. Flag as file-enumeration-required.'
+                        )
+                        print(f"    Files: WARNING — landing-page fallback detected ({sole_url[:80]})")
+                except Exception as _lp_err:
+                    pass  # if we can't check, continue
         except Exception as e:
             result['warnings'].append(f'{acc}: could not list files — {e}')
             file_children = []
@@ -1734,7 +1767,26 @@ for proj in created:
             except Exception as e:
                 result['warnings'].append(f'{acc}: Dataset {dataset_id} check failed: {e}')
 
-        # 4d. Schema binding
+        # 4d-pre. Stable Dataset version — mint if no labeled snapshot exists
+        if dataset_id:
+            try:
+                versions_resp = syn.restGET(f'/entity/{dataset_id}/version?limit=10&offset=0')
+                versions = versions_resp.get('results', [])
+                has_labeled = any(v.get('versionLabel') for v in versions)
+                if not has_labeled:
+                    snap = syn.restPOST(
+                        f'/entity/{dataset_id}/version',
+                        json.dumps({'label': 'v1', 'comment': 'Stable version minted by NADIA audit'})
+                    )
+                    result['fixes_applied'].append(
+                        f'{acc}: Dataset stable version minted (v{snap.get("versionNumber", 1)})')
+                    print(f"    Dataset stable version: FIXED — minted v{snap.get('versionNumber', 1)}")
+                else:
+                    print(f"    Dataset stable version: OK")
+            except Exception as e:
+                result['warnings'].append(f'{acc}: stable version check failed: {e}')
+
+        # 4e. Schema binding
         if schema_uri and files_folder_id:
             try:
                 try:
@@ -1844,11 +1896,12 @@ After running `audit.py`, read `{WORKSPACE_DIR}/audit_results.json`. For each pr
    - `studyLeads`: if PMID known, fetch AuthorList; take first + last author
    - `institutions`: from author affiliations in PubMed record
    - `alternateDataRepository`: reconstruct from accession_id + source_repository using REPO_TO_PREFIX
-   - `assay`, `species`, `tumorType`, `diagnosis`: infer from abstract + title
+   - `assay`, `species`, `tumorType`, `diagnosis`: infer from abstract + title — but see Standard 12: if samples are normal/control cells, do NOT assign the disease tumor type
    - `platform`: fetch from repository metadata (GEO GSE → series platform, SRA → instrument model)
    - `libraryPreparationMethod`: infer from abstract ("10x Chromium", "Smart-seq2", "polyA", etc.)
    - `specimenID` for files where auto-parse failed: look at repository sample table (GEO GSM list, SRA BioSample)
    - `wiki` missing: create using the wiki template from this file
+   - **`LANDING_PAGE_FALLBACK` warnings**: for each dataset flagged in Phase 1 warnings, add an item to the GitHub curation comment under "Items for human review": `file-enumeration-required — files folder contains only a landing-page link to {url}. Actual data files could not be enumerated. Manual re-enumeration or data linking needed.`
 4. **Write `{WORKSPACE_DIR}/audit_reasoning_fixes.json`** with all resolved values
 
 ```json
