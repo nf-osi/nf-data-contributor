@@ -468,6 +468,7 @@ def classify_publication_group(group, portal_studies_df, agent_state_set):
 - `syn52694652` has **no `pmid` or `doi` columns**. Do not query for them.
 - `alternateDataRepository` column serializes as NaN floats when empty — always cast with `.apply(lambda x: str(x) if x is not None else '')` before string ops.
 - NCBI elink false positives: always verify accession ownership (check GEO record's `PubMedIds` matches the paper being processed).
+- **NTAP-funded studies require special handling:** If the PubMed GrantList or repository acknowledgements mention "NTAP" (Neurofibromatosis Therapeutic Acceleration Program), do not auto-create a new Synapse project. NTAP-funded data is often expected to be integrated into an existing NTAP project in the portal. Instead: (a) log the study as `discovered` in the state table, and (b) file a GitHub issue flagged with label `ntap-integration-review` so a data manager can determine the correct destination. Proceeding directly to NEW bypasses this check and forces data managers to manually move Synapse entities after the fact.
 
 ---
 
@@ -592,6 +593,7 @@ When populating schema fields, the Annotation Quality Standards apply (see secti
 > **NEVER set on File entities — regardless of what the schema says:**
 > - The resource/review status field — belongs only on the **Project** and **Dataset entity**. Setting it on files creates a spurious column in the Datasets tab.
 > - A custom filename annotation — the Synapse system `name` property is the filename column in Dataset views. Adding it as a custom annotation creates a duplicate column.
+> - A custom annotation named `name` — the Synapse system `name` property is the entity name column in Dataset views. Adding a custom annotation called `name` creates a second annotation column that either duplicates or conflicts with the system column, making the Dataset `name` column appear broken or empty. Add `'name'` to `EXCLUDE_COLS` alongside `'resourceStatus'` and `'filename'`.
 
 Any schema field that captures where files are physically hosted must reflect the **actual file host**, not the study discovery path. If files are stored in ENA/SRA and the study was discovered via a GEO link, the hosting repository field must say 'ENA' or 'SRA' — GEO is a study metadata portal, not a file host for SRA-deposited data.
 
@@ -967,6 +969,7 @@ Before logging `synapse_created` or `dataset_added`, verify:
 - [ ] **No sample-varying field has the same value on all files** unless the study genuinely has only one sample group — if a field like genotype, condition, sex, age, tissue, or cell type is uniform across all files in a multi-group study, that is a signal it was set at study level rather than per-sample (Standard 5 violation)
 - [ ] **No File entity has a resource/review status annotation** — that field belongs only on Project and Dataset entities; setting it on files creates an unwanted column in the portal view
 - [ ] **No File entity has a custom filename annotation** — the Synapse system `name` property is the filename column in Dataset views; adding it as a custom annotation creates a duplicate column
+- [ ] **No File entity has a custom annotation named `name`** — like `filename`, a custom `name` annotation conflicts with the Synapse system `name` column and produces an empty or broken column in the Dataset view; the audit must detect and remove it
 - [ ] Any file-format/extension field strips compression suffixes before storing (e.g. `fastq.gz` → `fastq`, `txt.gz` → `txt`)
 - [ ] Per-sample identifier fields contain a unique value per file — not a shared value copied to all files
 - [ ] No file has a zip-extraction flag as its only/final annotation

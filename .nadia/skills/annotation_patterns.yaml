@@ -122,10 +122,13 @@ patterns:
       Entrez.esummary(db='gds', id=...) and verify that PubMedIds contains
       the PMID being processed. If it does not match, discard the accession —
       do not process it under the wrong paper. It will be discovered again when
-      its actual paper is processed.
+      its actual paper is processed. This is not optional — incorrect elink
+      attribution caused a proteomics dataset (GSE263107) to be grouped inside
+      a methylation project it had no connection to, resulting in wrong schema
+      binding and misattributed annotations.
     source: fix
-    issues: []
-    added: "2026-04-16"
+    issues: [120]
+    updated: "2026-04-26"
 
   - pattern: "germline disease scoping — somatic vs germline"
     rule: >
@@ -172,9 +175,17 @@ patterns:
       STRING respectively). Then add alphabetically sorted annotation columns.
       Final order: [id_col_id, name_col_id] + sorted_annotation_col_ids.
       The audit must also enforce this ordering when rebuilding columnIds.
+      CRITICAL — never create a custom annotation called `name` on File or
+      Dataset entities. The Synapse system `name` property IS the entity name
+      column in Dataset views. If you add a custom `name` annotation, it
+      appears as a separate annotation column with empty or duplicate values,
+      making the Dataset view confusing and missing the real filename.
+      Add 'name' to EXCLUDE_COLS alongside 'resourceStatus' and 'filename'.
+      The audit auto-fix must detect and remove any custom 'name' annotation
+      from all File entities (same pattern as the existing 'filename' removal).
     source: fix
-    issues: [10, 11, 220, 223]
-    added: "2026-04-16"
+    issues: [10, 11, 220, 223, 251]
+    updated: "2026-04-26"
 
   - pattern: "Source Metadata folder must be populated"
     rule: >
@@ -185,8 +196,8 @@ patterns:
       for data managers and fails the completion checklist. The audit must flag
       empty Source Metadata/ folders. See synapse_workflow.md for what to store.
     source: fix
-    issues: [177, 220, 223, 186]
-    added: "2026-04-16"
+    issues: [177, 220, 223, 186, 267]
+    updated: "2026-04-26"
 
   - pattern: "Dataset names must be descriptive"
     rule: >
@@ -265,13 +276,17 @@ patterns:
         *This project was auto-curated by [NADIA](https://github.com/nf-osi/nadia)
         on {today} and is pending data manager review.*
       Use "auto-curated by NADIA" (not "ingested automatically by @nadia-bot").
-      The wiki must also include a disclaimer section if one is expected by the
-      portal's wiki template standards (check with data managers if uncertain).
       The wiki title must be the full publication title — never "Auto-Discovered"
       or generic placeholders.
-    source: fix+confirmed
-    issues: [216]
-    added: "2026-04-16"
+      The portal's standard wiki template also requires a disclaimer section that
+      NADIA's auto-generated wiki has been missing (Issues #267, #251). Until the
+      exact disclaimer text is confirmed by DCC (flagged for human review in the PR),
+      flag wikis as "disclaimer section needed" in the GitHub curation comment. Do
+      NOT generate wiki content that differs structurally from the template in
+      prompts/synapse_workflow.md — use exactly that function's output.
+    source: fix
+    issues: [216, 267, 251]
+    updated: "2026-04-26"
 
   - pattern: "figshare-per-doi-grouping"
     rule: >
@@ -329,3 +344,40 @@ patterns:
     source: fix
     issues: [168, 242]
     added: "2026-04-19"
+
+  - pattern: "ntap-study-integration-check"
+    rule: >
+      When a study's PubMed GrantList or fundingAgency annotation contains "NTAP"
+      (Neurofibromatosis Therapeutic Acceleration Program), the new data may belong
+      inside an existing portal NTAP project rather than as a standalone new project.
+      Before classifying such a study as NEW, query the portal studies table for any
+      study with fundingAgency matching 'NTAP' and similar diseaseFocus. If potential
+      matches exist, flag the study in the GitHub issue with a note: "NTAP-funded
+      study — may require integration into an existing NTAP project. Data manager
+      review required before provisioning." Do NOT automatically create a new project
+      when this flag is set; instead, log as `discovered` in the state table and wait
+      for data manager guidance. A data manager who creates a study without this check
+      will have to manually move folders across Synapse projects — an expensive fix.
+    source: fix
+    issues: [251]
+    added: "2026-04-26"
+
+  - pattern: "amplicon-library-strategy-vocabulary-gap"
+    rule: >
+      When ENA/SRA metadata shows library_strategy = AMPLICON (with or without
+      library_source = GENOMIC), the assay is typically a functional genetic screen
+      (shRNA library screen, CRISPR screen, or barcode-counting screen) that uses
+      amplicon sequencing as its readout. No specific enum value exists for this
+      assay type in the current portal schema (e.g. bulksequencingassaytemplate).
+      Correct handling:
+        1. Set assay to the closest available enum value — typically
+           "next-generation sequencing"
+        2. Flag as a vocabulary gap in the GitHub curation comment:
+           "Assay is functional genetic screen (ENA library_strategy=AMPLICON).
+            No specific enum exists — used 'next-generation sequencing' as
+            closest. DCC vocabulary extension requested."
+        3. Do NOT use "RNA-seq", "WGS", or other specific assay names that
+           imply a different library type.
+    source: fix
+    issues: [35]
+    added: "2026-04-26"

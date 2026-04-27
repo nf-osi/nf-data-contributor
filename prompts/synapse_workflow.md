@@ -161,9 +161,11 @@ import json
 HIGH_CARDINALITY = {'specimenID', 'individualID', 'externalAccessionID', 'name', 'id',
                     'sampleId', 'runAccession', 'biosampleId'}
 
-# NOTE: resourceStatus and filename are intentionally EXCLUDED — resourceStatus belongs
-# only on Project and Dataset entities; filename creates a duplicate of the system name column.
-EXCLUDE_COLS = {'resourceStatus', 'filename'}
+# NOTE: resourceStatus, filename, and name are intentionally EXCLUDED.
+# resourceStatus belongs only on Project and Dataset entities.
+# filename and name both create duplicates of the Synapse system 'name' column —
+# adding either as a custom annotation produces a confusing extra column in Dataset views.
+EXCLUDE_COLS = {'resourceStatus', 'filename', 'name'}
 
 # Collect all unique annotation keys from the files in this dataset
 all_annotations = {}   # key -> annotation value object (for type inference)
@@ -1171,7 +1173,7 @@ These issues were discovered when the audit was run on real agent-created projec
 
 14. **Resource/review status must NOT be set on individual File entities** — Data managers have consistently requested removal of this annotation from files. It belongs only on the **Project** and **Dataset entity** (as an entity-level annotation). The audit Phase 1 auto-fix now **removes** it from any file that has it. Do not set it during creation either.
 
-15. **`filename` annotation causes duplicate columns** — Do NOT add a custom `filename` annotation to files. The Synapse system `name` property serves as the filename in Dataset views. Adding `filename` as a custom annotation creates a second column that data managers must manually clean up. The audit Phase 1 auto-fix removes `filename` annotations from files.
+15. **`filename` or `name` annotation causes duplicate columns** — Do NOT add a custom `filename` or `name` annotation to files. The Synapse system `name` property serves as the entity name and filename in Dataset views. Adding either as a custom annotation creates a second column that data managers must manually clean up, and makes the real system `name` column appear empty or broken. The audit Phase 1 auto-fix removes both `filename` and `name` annotations from files. Both fields are in `EXCLUDE_COLS`.
 
 16. **Dataset names must be descriptive and specific** — Names like `GEO_GSE120686` are not useful. The Dataset name is the first thing a data manager sees in the Datasets tab, so it should convey what the data actually is without having to open the record.
 
@@ -1495,6 +1497,13 @@ for proj in created:
                     del fe.annotations['filename']
                     file_gap['fixes'].append('filename annotation REMOVED (use system name column)'); changed = True
 
+                # Remove any custom 'name' annotation — Synapse system 'name' is the entity name column.
+                # A custom 'name' annotation creates a duplicate annotation column in Dataset views,
+                # causing the expected name column to appear empty or broken.
+                if 'name' in ann_dict:
+                    del fe.annotations['name']
+                    file_gap['fixes'].append('name annotation REMOVED (conflicts with system name column)'); changed = True
+
                 if not _scalar(ann_dict.get('resourceType')):
                     fe.annotations['resourceType'] = 'experimentalData'
                     file_gap['fixes'].append('resourceType → experimentalData'); changed = True
@@ -1548,7 +1557,7 @@ for proj in created:
 
                 # Zero-annotation check — file has no annotations at all
                 # (auto-fixes above may have deleted some; check original ann_dict)
-                schema_fields = [k for k in ann_dict if k not in ('resourceStatus', 'filename')]
+                schema_fields = [k for k in ann_dict if k not in ('resourceStatus', 'filename', 'name')]
                 if not schema_fields:
                     file_gap['gaps'].append('FILE HAS NO ANNOTATIONS — requires full annotation pass in Phase 2')
 
