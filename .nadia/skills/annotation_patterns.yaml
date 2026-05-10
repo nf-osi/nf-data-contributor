@@ -415,3 +415,62 @@ patterns:
     source: fix
     issues: [35]
     added: "2026-04-26"
+
+  - pattern: "variant-classification-disease-focus"
+    rule: >
+      When a study's PURPOSE is to functionally characterize variants of a
+      disease gene for clinical interpretation in the disease population
+      (e.g., VUS reclassification, saturation mutagenesis, base-editing variant
+      scans, MAVE / deep mutational scanning of NF1/NF2/SMARCB1/LZTR1), set
+      diseaseFocus to the corresponding disease (NF1, NF2, schwannomatosis)
+      EVEN IF the experimental system is a cancer cell line or non-disease
+      cell type. The cell line is a tool; the study OUTPUT (per-variant
+      functional scores for clinical interpretation) is for the disease patient
+      community.
+      This is the deliberate exception to the germline-vs-somatic rule
+      (CLAUDE.md Standard 13). Apply it only when the study explicitly aims to
+      produce variant interpretation for the disease — NOT when the disease
+      gene happens to be one of many drivers in a general cancer screen, and
+      NOT when the cell line incidentally carries somatic loss of the disease
+      gene without it being the study's focus.
+      Detection signals: paper title or abstract uses phrases like
+      "variant classification", "VUS reclassification", "functional impact of
+      variants", "saturation genome editing", "base editing screen of <gene>",
+      "deep mutational scanning of <gene>". The targeted gene is the disease
+      gene, not an unrelated cancer driver.
+      Always flag in the GitHub curation comment so the data manager can
+      confirm the decision matches portal scope (note: "Disease focus chosen
+      because study purpose is functional variant classification for <disease>,
+      despite cancer cell line system. Confirm portal scope.").
+    source: fix
+    issues: [292]
+    added: "2026-05-10"
+
+  - pattern: "processed-only-deposit-tier4-primary"
+    rule: >
+      When a Synapse project's only files are processed data (h5ad, loom,
+      Seurat .rds, processed count matrices, MTX bundles) with NO associated
+      raw FASTQ/BAM and NO linked SRA/GEO accession, Tier 1 structured
+      metadata sources yield nothing for per-sample biological fields. In
+      this case, Tier 4 file inspection (h5ad obs table, count matrix headers,
+      loom col_attrs) becomes the PRIMARY source for per-cell/per-sample
+      genotype, perturbation identity, cell type, condition, and sample IDs —
+      not the last resort.
+      For processed-only single-cell deposits, you MUST:
+        1. Download the h5ad/loom file (or use HTTP Range requests for the
+           HDF5 obs block on large files)
+        2. Call inspect_h5ad_obs(local_path) to enumerate obs column names
+        3. Read each relevant obs column for per-cell values
+        4. Validate obs categories against schema enums via
+           validate_against_enum()
+        5. Apply per-sample values to the h5ad File entity's annotations
+      "Tier 4 not performed" is NOT an acceptable gap-fill outcome when the
+      deposit is processed-only. The audit must flag projects where the only
+      file is an h5ad/loom/rds and Tier 4 inspection was skipped — this is a
+      blocking issue, not a "human review" item.
+      Detection signal: the project's Raw Data folder contains only files
+      with extensions .h5ad, .loom, .rds, .h5, .anndata, or .mtx, and the
+      gap_fill_report shows zero filled_tier4 entries.
+    source: fix
+    issues: [292]
+    added: "2026-05-10"

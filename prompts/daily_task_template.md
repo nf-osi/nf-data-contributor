@@ -214,6 +214,7 @@ The audit script (code in `prompts/synapse_workflow.md`):
   - Dataset name is non-descriptive (just an accession code) → flag for Phase 2 rename
   - Any File entity has zero annotations → **BLOCKING ERROR**: mark project with `zero_annotation_error` in audit_results.json; do NOT log as `synapse_created` until all files have at least minimal annotations. Phase 2 must resolve before the project can be logged.
   - Schema template URI does not match the assay type annotated on the files (e.g., schema name contains "rna" but files have assay="Whole Genome Sequencing") → **BLOCKING ERROR**: mark project with `schema_mismatch_error`; rebind the correct schema and re-validate before clearing the block.
+  - Project's Raw Data folder contains only processed files (.h5ad, .loom, .rds, .h5, .anndata, .mtx) and no Tier 4 file inspection was performed → **BLOCKING ERROR**: mark project with `tier4_skipped_processed_only`; Phase 2 must download and inspect the processed file's obs/col_attrs/header to recover per-cell biological fields before clearing the block. See "processed-only-deposit-tier4-primary" pattern in `.nadia/skills/annotation_patterns.yaml`.
 - **Collects context** for issues that require reasoning (annotation fields that need domain knowledge)
 - Prints a structured report and writes `{WORKSPACE_DIR}/audit_results.json`
 

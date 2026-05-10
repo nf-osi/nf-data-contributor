@@ -510,6 +510,8 @@ When structured sources don't yield a value, extract from free text using agent 
 
 Read actual data files only after exhausting all upstream metadata. This is the last resort for fields that genuinely aren't documented anywhere else.
 
+> **Tier 4 is the PRIMARY source — not the last resort — for processed-only deposits.** When the project's Raw Data folder contains only processed files (.h5ad, .loom, .rds, .h5, .anndata, .mtx) with no associated raw FASTQ/BAM and no SRA/GEO accession, Tier 1 structured metadata yields nothing for per-cell/per-sample biological fields and Tier 2 may yield nothing if the paper is not in PMC. In that case, run Tier 4 inspection FIRST for Category B (biological sample) and Category D (identifier) fields. The h5ad `obs` table or loom `col_attrs` is the ground truth for per-cell genotype, perturbation identity, cell type, condition, sample/patient IDs, sex, age, and treatment. Skipping Tier 4 for a processed-only deposit produces a curation comment full of "could not be populated" entries that are actually all available — this is an incomplete gap-fill, not a legitimate set of gaps. The audit must flag any processed-only project whose `gap_fill_report` shows zero `filled_tier4` entries.
+
 ### h5ad / AnnData files (scRNA-seq, snATAC-seq)
 
 ```python

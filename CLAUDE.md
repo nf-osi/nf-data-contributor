@@ -715,6 +715,8 @@ When setting disease-focus or diagnosis annotations, distinguish between germlin
 2. Check model organism genotype: `Nf1+/-` (heterozygous germline) = germline model; `NF1 siRNA knockdown in MCF-7` = somatic model.
 3. When uncertain, use the specific tumor/cancer type annotation and flag for human review.
 
+**Exception — functional variant classification studies:** When a study's explicit purpose is to functionally characterize variants of a disease gene for clinical interpretation in the disease population (e.g., VUS reclassification, saturation mutagenesis, base-editing variant scans, deep mutational scanning of NF1/NF2/SMARCB1/LZTR1), set the disease annotation EVEN IF the experimental system is a cancer cell line or non-disease cell type. The cell line is a tool; the study output (per-variant functional scores) is for the disease patient community. Detection signals: paper title or abstract uses phrases like "variant classification", "VUS reclassification", "functional impact of variants", "saturation genome editing", "base editing screen of {gene}", or "deep mutational scanning of {gene}", and the targeted gene is the disease gene, not an unrelated driver. Always flag this decision in the GitHub curation comment so the data manager can confirm portal scope.
+
 This distinction matters because portal data consumers use disease annotations to find data relevant to patients with inherited conditions — mixing in somatic cancer data produces misleading search results.
 
 ### 12 — Normal and control samples: do not assign tumor type from disease search context
