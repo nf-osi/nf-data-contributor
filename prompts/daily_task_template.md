@@ -201,6 +201,8 @@ The audit script (code in `prompts/synapse_workflow.md`):
   - `pmid`/`doi` missing but known → set from project metadata
   - Data manager team permissions (`synapse.team_id` from config) missing → grant
   - Dataset `items` empty → re-link from files folder
+  - Dataset item versions stale (linked version < current file version) → sync each item to its file's current `versionNumber`
+  - **NEVER mint stable Dataset versions in Phase 1** — Phase 1 runs before Phase 3 applies annotation fixes; a v1 snapshot minted here will point to unannotated file versions. Phase 3 is the only step that mints. See Audit Lessons 23, 24 in `prompts/synapse_workflow.md`.
   - Dataset `columnIds` missing or wrong order → create/rebuild with `id` and `name` as first two columns, then annotation columns alphabetically
   - Dataset entity annotations missing → set defaults
   - `fileFormat` with compression suffix (`.gz`) → strip to bare extension

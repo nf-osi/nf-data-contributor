@@ -1205,7 +1205,9 @@ These issues were discovered when the audit was run on real agent-created projec
 
 22. **Files folder containing only a landing-page link** — When `get_file_list_*` returns empty and the fallback to a single landing-page ExternalLink is used, the project is incomplete. Phase 1 detects this by checking if a files folder has exactly one file whose URL contains no recognizable file extension and matches a landing-page pattern (`acc.cgi`, `dataset.jsp`, `/records/`, `/record/`, etc.). Flag with a `landing_page_fallback` warning in `audit_results.json` and add `file-enumeration-required` to the GitHub curation comment under "Items for human review". Do NOT suppress or auto-fix this — it requires a human to trigger re-enumeration or manually link files. → Standard 13
 
-23. **Dataset stable version must be minted after all annotation fixes** — After Phase 3 applies all annotation fixes, Phase 1 (on a re-run) checks whether each Dataset entity has a stable snapshot version (any version with a label). If not, mint one with `POST /entity/{dataset_id}/version`. The version is the permanent citable record — data managers will explicitly request it if missing. Always mint after annotation corrections are complete, not before. → Lesson 17
+23. **Dataset stable version must be minted in Phase 3 only — never in Phase 1** — Phase 3 (`apply_audit_fixes.py`) is the authoritative and only step that mints stable Dataset snapshot versions. Phase 1 must NOT mint versions: it runs before Phase 3 applies annotation fixes, so any snapshot minted in Phase 1 will point to pre-annotation file versions and show blank columns in the portal Datasets tab. **Root cause of Issue #27:** Phase 1 minted v1 with unannotated file references; Phase 3 then tried to mint another v1 but failed silently (duplicate label conflict), leaving the bad v1 as the only stable snapshot visible to data managers. Phase 1 must only CHECK whether a stable version exists and log a warning if missing — it must not mint. → Lesson 17
+
+24. **Phase 3 version label must not hardcode 'v1' — use next available label** — Before minting a stable Dataset version in `apply_audit_fixes.py`, always query `GET /entity/{dataset_id}/version` to retrieve existing version labels. Choose the next available label in sequence (v1, v2, v3...) rather than hardcoding 'v1'. If 'v1' already exists (from an earlier premature mint), Phase 3 must mint 'v2' so the post-annotation snapshot supersedes the earlier one. Always sync Dataset items to the latest file `versionNumber` values BEFORE minting, so the snapshot reflects the post-annotation file state.
 
 ### `created_projects.json` Schema (output of Step 6, input to audit)
 
@@ -1780,20 +1782,20 @@ for proj in created:
             except Exception as e:
                 result['warnings'].append(f'{acc}: Dataset {dataset_id} check failed: {e}')
 
-        # 4d-pre. Stable Dataset version — mint if no labeled snapshot exists
+        # 4d-pre. Stable Dataset version — CHECK ONLY. Do NOT mint here.
+        # Minting happens exclusively in Phase 3 (apply_audit_fixes.py) AFTER all
+        # annotation fixes are applied. If we mint in Phase 1, the snapshot points
+        # to pre-annotation file versions; Phase 3 then silently fails on duplicate
+        # label 'v1' and the bad snapshot persists. → Audit Lessons 23, 24
         if dataset_id:
             try:
                 versions_resp = syn.restGET(f'/entity/{dataset_id}/version?limit=10&offset=0')
                 versions = versions_resp.get('results', [])
                 has_labeled = any(v.get('versionLabel') for v in versions)
                 if not has_labeled:
-                    snap = syn.restPOST(
-                        f'/entity/{dataset_id}/version',
-                        json.dumps({'label': 'v1', 'comment': 'Stable version minted by NADIA audit'})
-                    )
-                    result['fixes_applied'].append(
-                        f'{acc}: Dataset stable version minted (v{snap.get("versionNumber", 1)})')
-                    print(f"    Dataset stable version: FIXED — minted v{snap.get('versionNumber', 1)}")
+                    result['warnings'].append(
+                        f'{acc}: Dataset has no stable snapshot — Phase 3 will mint after fixes')
+                    print(f"    Dataset stable version: PENDING — Phase 3 will mint")
                 else:
                     print(f"    Dataset stable version: OK")
             except Exception as e:
@@ -2029,12 +2031,23 @@ for proj_fix in fixes:
                 ds_body2['items'] = updated_items
                 syn.restPUT(f'/entity/{dataset_id}', json.dumps(ds_body2))
                 print(f"  Dataset {dataset_id}: item versions synced")
-            # Mint stable version
+            # Determine next available version label — never hardcode 'v1'.
+            # If Phase 1 or a prior run already minted v1, use v2, v3, etc.
+            # The latest labeled version is what data managers will see. → Audit Lesson 24
+            ver_resp = syn.restGET(f'/entity/{dataset_id}/version?limit=10&offset=0')
+            existing_labels = {v.get('versionLabel', '') for v in ver_resp.get('results', [])}
+            next_label = next(
+                (f'v{n}' for n in range(1, 100) if f'v{n}' not in existing_labels),
+                'v-post-audit'
+            )
+            # Mint stable version with all annotation fixes reflected
             snap = syn.restPOST(
                 f'/entity/{dataset_id}/version',
-                json.dumps({'label': 'v1', 'comment': 'Stable version after NADIA annotation review'})
+                json.dumps({'label': next_label,
+                            'comment': 'Stable version after NADIA annotation review'})
             )
-            print(f"  Dataset {dataset_id}: stable version minted → v{snap.get('versionNumber', '?')}")
+            print(f"  Dataset {dataset_id}: stable version minted → {next_label} "
+                  f"(v{snap.get('versionNumber', '?')})")
         except Exception as e:
             print(f"  Dataset {dataset_id} snapshot failed: {e}")
 

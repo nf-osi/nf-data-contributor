@@ -30,11 +30,15 @@ patterns:
       Do not infer libraryPreparationMethod from the assay type or paper title.
       '10x Chromium' does not imply any specific kit version. Check ENA sample
       attributes, BioStudies protocol section, or GEO GSM characteristics for the
-      explicit kit/method name. If not found in any source, set to 'unknown' and
-      flag in the curation comment — do not guess.
-    source: fix
-    issues: []
-    added: "2026-04-16"
+      explicit kit/method name. If the kit version is not explicitly stated in any
+      structured source (not even inferred from protocol context), set to 'Unknown'
+      and flag in the curation comment — do not guess a version that isn't stated.
+      Issue #29 confirmed: setting 'Chromium Single Cell 3' Reagent Kit v3' based
+      on protocol inference (not an explicit metadata statement) was rejected by
+      the data manager. Set to 'Unknown' and let a human confirm if needed.
+    source: fix+confirmed
+    issues: [29]
+    updated: "2026-05-03"
 
   - pattern: "readPair enum is empty — do not set"
     rule: >
@@ -360,8 +364,8 @@ patterns:
       BLOCKING rather than "HIGH PRIORITY for Phase 2". If Phase 2 completes
       without annotating these files, log the project as error and move on.
     source: fix
-    issues: [251, 184, 28]
-    added: "2026-04-19"
+    issues: [251, 184, 28, 35]
+    updated: "2026-05-03"
 
   - pattern: "assay-schema-mismatch-is-blocking"
     rule: >
@@ -415,3 +419,66 @@ patterns:
     source: fix
     issues: [35]
     added: "2026-04-26"
+
+  - pattern: "dataset-version-phase3-only"
+    rule: >
+      Phase 3 (apply_audit_fixes.py) is the ONLY step that mints stable Dataset
+      snapshot versions. Phase 1 (audit.py) must NOT mint versions during a normal
+      run — it runs before Phase 3 applies annotation fixes, so any v1 snapshot
+      minted in Phase 1 will point to pre-annotation file versions and show blank
+      columns in the portal Datasets tab.
+      Root cause of Issue #27: Phase 1 minted v1 with unannotated file references;
+      Phase 3 then tried to mint another v1 but failed silently (label conflict),
+      leaving the bad v1 as the only stable snapshot.
+      Two required fixes in Phase 3 code:
+        1. Before minting, query GET /entity/{id}/version to get existing labels.
+           Use the next available label: v1, v2, v3... (never hardcode 'v1').
+        2. Always sync Dataset items to the latest file versionNumbers BEFORE
+           minting, so the snapshot reflects the post-annotation file state.
+      In Phase 1: replace the minting block with a check-only block that logs a
+      warning "Dataset has no stable snapshot — Phase 3 will mint" if missing.
+    source: fix
+    issues: [27]
+    added: "2026-05-03"
+
+  - pattern: "specimenType-cell-line-not-tissue-origin"
+    rule: >
+      When a study uses in vitro cell cultures (immortalized cell lines, primary
+      cultures, or otherwise), set specimenType (or whichever schema field captures
+      specimen type) to 'cell line' — NOT the anatomical tissue of origin. A Schwann
+      cell line or any other immortalized line is a cell line regardless of the
+      tissue it derived from. Setting it to 'nerve tissue', 'bone marrow', or any
+      anatomical tissue type is wrong when the samples are cultured cells.
+      How to determine: read GEO GSM sample type attribute or BioSample `sample type`
+      field. Look for "cell line" in the characteristics. If the paper's Materials and
+      Methods describes an immortalized cell line or primary culture, specimenType =
+      'cell line'. Only use an anatomical tissue type when the sample is a direct
+      biopsy, surgical resection, or organism-derived tissue without in vitro culture.
+    source: fix+confirmed
+    issues: [35]
+    added: "2026-05-03"
+
+  - pattern: "accessions-verify-generated-not-reused"
+    rule: >
+      Before associating a dataset accession with a paper's Synapse project, verify
+      the paper GENERATED that specific data deposit — not merely cited, analyzed, or
+      reused it. A paper's Methods section frequently mentions existing public datasets
+      that were downloaded and reanalyzed alongside newly generated data. CrossRef
+      relations and Europe PMC annotations return ALL accession mentions including
+      reused ones.
+      Signals that data was reused, not generated:
+        - Repository deposit date predates the paper's submission date by more than
+          a few weeks (papers typically deposit concurrent with submission)
+        - The accession's GEO/ENA record lists a different primary PMID
+        - The paper says "we downloaded data from GEO/TCGA/SRA" for that accession
+        - The repository abstract cites a different publication as the primary study
+      Action when reuse is detected:
+        - Exclude the accession from the current project
+        - Write the accession to reanalysis_originals.json as a seed candidate
+        - If the original study isn't already in the portal, it will be picked up on
+          the next run
+      The same paper can have both generated and reused accessions — split them
+      correctly. Only the generated accessions belong in the new project.
+    source: fix
+    issues: [23]
+    added: "2026-05-03"
