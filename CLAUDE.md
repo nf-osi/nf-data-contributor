@@ -397,6 +397,9 @@ Before creating or modifying any Synapse project, classify each publication grou
 - **ADD** — Partial match: publication exists but ≥1 new accession not yet in portal
 - **NEW** — No match: create a new Synapse project
 
+**Step 0 — Cross-run PMID dedup against agent state table:**
+Before any accession or title matching against the portal, query the agent's own `{state_table_prefix}_ProcessedStudies` table for any row where `pmid` equals the current group's PMID and `status` is not one of `error`, `rejected_relevance`, or `rejected_duplicate`. If a match is found, the publication was already processed in a previous run — look up its `synapse_project_id` and classify as ADD (if the group contains accessions not yet listed in that project) or SKIP (if all accessions are already present). This prevents a second Synapse project from being created for the same paper when its datasets were discovered through different paths or in different runs.
+
 ### Matching Logic
 
 ```python
@@ -503,8 +506,8 @@ with open(f'{WORKSPACE_DIR}/scored.json', 'w') as f:
 
 **Reject these regardless of relevance score:**
 - **Re-analysis studies** — the paper reprocesses existing public GEO/SRA/TCGA data without depositing new primary data. Signal: paper says "we downloaded from GEO/TCGA", no new repository accession for this paper. Action: skip; extract the original repository accessions mentioned in the paper's data availability statement or methods section, and write them to `{WORKSPACE_DIR}/reanalysis_originals.json` (format: `[{"accession": "GSE12345", "source": "GEO", "from_pmid": "..."}]`). These are checked against the state table at run end and queued as seeds for the next run if not already processed.
-- **Summary-only datasets** — repository contains only aggregate statistics (p-value tables, coefficient files, summary TSVs) with no raw or processed primary data files. Signal: all files are `.txt` summary tables; no FASTQ/BAM/count matrix/raw data.
-- **Stub/empty repositories** — repository record exists but no data files are deposited yet. Signal: OSF with 0 files, Zenodo draft not published, embargoed with no accessible files.
+- **Summary-only datasets** — repository contains only aggregate statistics (p-value tables, coefficient files, summary TSVs) with no raw or processed primary data files. Signal: all files are `.txt`, `.xlsx`, `.csv`, `.pdf`, `.html`, or `.docx` document files with no FASTQ/BAM/VCF/count matrix/h5ad/image data. **Apply this check at scoring time using the file list returned by the repository API** — do not create Synapse entities for a repository whose file list contains only documents, then flag it for human review. The rejection must happen before any Synapse write.
+- **Stub/empty repositories** — repository record exists but no data files are deposited yet. Signal: OSF with 0 files, Zenodo draft not published, embargoed with no accessible files. Fetch the file count from the repository API before creating the project — a record with 0 accessible files must be rejected at this stage.
 - **Out-of-scope disease context** — the paper's connection to the target disease is only through somatic mutation in a general cancer cohort, with no germline disease connection. Treat this carefully — see Standard 13 for specific guidance on disease annotation.
 
 ---
@@ -687,7 +690,7 @@ This comment is the handoff from autonomous annotation to human review. Without 
 After annotating files, run the full gap-fill algorithm from `prompts/annotation_gap_fill.md` before considering annotation done. The algorithm works through four tiers of sources in priority order — stopping at the first tier that yields a valid value for each missing field:
 
 - **Tier 1** — Structured repository metadata (ENA filereport with all columns, BioSample XML, ENA sample XML, GEO GSM characteristics, SRA RunInfo)
-- **Tier 2** — Publication metadata (PMC full text methods section, supplementary tables downloaded and parsed, CrossRef funder info)
+- **Tier 2** — Publication metadata (PMC full text methods section, supplementary tables downloaded and parsed, CrossRef funder info). For `fundingAgency` specifically: if the PubMed GrantList is empty, the PMC full-text Acknowledgements section is a mandatory Tier 2 source — parse it for grant numbers, agency names (NIH, NSF, ERC, Wellcome, etc.), and foundation names before falling back to the "not applicable" placeholder. The placeholder is only appropriate when the paper is not in open-access PMC or when the Acknowledgements section genuinely contains no funding information.
 - **Tier 3** — Text extraction via reasoning (abstract, methods section, supplementary table rows — extract unambiguous values only)
 - **Tier 4** — Data file inspection (h5ad/loom obs columns, BAM @RG tags, FASTQ headers, count matrix column headers)
 
@@ -738,6 +741,30 @@ If a sample is normal or control: leave `tumorType` unset (or use the closest sc
 The goal of file creation is to link individual downloadable files, not repository landing pages. If `get_file_list_*` returned empty and the fallback to a landing-page `ExternalLink` was used, that project is **incomplete**. The audit must flag it; the GitHub curation comment must include it under "Items for human review" with the label `file-enumeration-required`.
 
 Do **not** log such a project as `synapse_created` without flagging the incomplete file enumeration. Data managers need to know that the project points to a landing page, not to data.
+
+### 14 — First-pass completeness: resolve everything autonomously resolvable before filing the review issue
+
+The GitHub study-review issue is the handoff to a human reviewer. Every item that appears under "Items for human review" represents work the data manager must do manually. The bar for escalating something to human review must be high: only items that genuinely cannot be resolved through available APIs, paper text, and file inspection belong there.
+
+Before filing the issue, verify that the following have been attempted and either resolved or documented as unresolvable with a specific reason:
+
+**Publication metadata** (required when a PMID is available):
+- `studyLeads` / investigator field — must come from PubMed AuthorList (first + last/corresponding author). If the PMID was resolved after initial project scaffolding, re-derive these now rather than leaving "Unknown".
+- `institutions` / affiliations — must come from PubMed `AffiliationInfo` for the first and last/corresponding authors. Do not leave blank if a PMID is available.
+- `fundingAgency` — PubMed GrantList first, then PMC full-text Acknowledgements section (Tier 2), then placeholder only as last resort. "Unknown funding" from a paper in open-access PMC is not acceptable — parse the Acknowledgements.
+
+**Disease and biology annotations** (from abstract + methods reasoning):
+- `manifestation` values — apply all valid portal controlled vocabulary terms derivable from the abstract and paper methods. Do not leave blank when the disease manifestation is unambiguous. Fetch current valid values from the live portal table at runtime.
+- `tumorType` and `diagnosis` — set from the study's sample description when unambiguous; do not leave blank if the sample type is clearly stated in the paper.
+
+**Assay type and schema selection** (from repository library metadata):
+- Determine the correct metadata schema by reading `library_strategy`/`library_source` (ENA), `!Series_library_strategy` (GEO), or file extensions from the repository API. Do not select a schema template based on the paper title or disease context. A wrong schema bound on the first pass creates a systematic annotation error that requires re-annotation of every file.
+
+**Processed-format files** (h5ad, loom, rds, h5, anndata, mtx, zarr):
+- When all deposited files are in processed formats, Tier 4 file inspection must be attempted before the issue is filed. These formats embed per-cell or per-sample metadata that populates the most important annotation fields. Do not defer this to the Polish workflow — a project whose only files are processed formats with no Tier 4 inspection performed must be treated as an incomplete audit (see `tier4_skipped_processed_only` blocking error in the audit step).
+
+**What belongs in "Items for human review":**
+Only escalate items that are genuinely unresolvable through automated means: controlled vocabulary gaps requiring a schema PR, metadata conflicts between repositories, NTAP/umbrella project linking decisions, portal-scope policy questions (e.g., sporadic vs. syndromic cohort scope), and cases where the correct value depends on contacting the authors. Everything else should be resolved on the first pass.
 
 ---
 
@@ -899,12 +926,21 @@ The `GITHUB_TOKEN` and `GITHUB_REPOSITORY` environment variables are automatical
 
 **Schema binding on the files folder is REQUIRED.** Without it, Curator Grid cannot validate.
 
+**Schema template selection must be based on the actual data modality, not the paper title or disease context.** Before selecting the template:
+- Fetch the assay type from repository library metadata: ENA `library_strategy` / `library_source`, GEO `!Series_library_strategy`, PRIDE `assayType`, or file extension inspection for repository-direct deposits
+- For multi-assay projects, determine the data modality of each accession's files separately — each may require a different template
+- Record the assay type in the scored group metadata so it is available for audit validation
+
+Only after establishing the actual assay type from source metadata, proceed with template selection:
+
 1. Read `synapse.schema.uri_prefix` and `synapse.schema.metadata_dictionary_url` from `config/settings.yaml`
 2. Fetch available templates from that URL
-3. Pick the best-matching template through reasoning (assay type, data modality, file types)
+3. Pick the best-matching template based on the verified assay type from step above (not by reasoning from the paper title)
 4. Convert name to URI: `{uri_prefix}` + lowercase template name
 5. Bind to the **files folder** (not the Dataset entity, not the project)
 6. Validate and print result
+
+If the library metadata is unavailable and the assay type must be inferred from paper context, document the inference basis in the GitHub curation comment so a reviewer can confirm.
 
 **Read `prompts/synapse_workflow.md`** for the `bind_schema()` helper and full schema selection code.
 
@@ -915,11 +951,13 @@ The `GITHUB_TOKEN` and `GITHUB_REPOSITORY` environment variables are automatical
 For repository-direct candidates (Zenodo, Figshare, OSF, etc.) found without a PMID:
 
 1. Check if the repository record has a PMID or DOI
-2. If DOI but no PMID: search PubMed with `"{doi}"[doi]`
-3. If neither: search PubMed by title (first 8 words as `[tiab]`)
-4. If PMID found: use paper title as project name, group all datasets from the same paper into one project
-5. If no publication found: **search bioRxiv** using key terms from the accession (mouse model name, assay method, PI institution, disease type from `config/keywords.yaml`). ENA/ArrayExpress datasets without a PMID frequently have an associated preprint posted after data submission. If a preprint is found, use it for studyLeads, doi, and wiki.
-6. If still no publication/preprint: use repository record title, note as possible preprint
+2. **Check `related_identifiers` / `relations` metadata for a publication link.** Zenodo, Dryad, Figshare, and most DataCite-registered repositories include structured relation fields. Look for relation types `isSupplementTo`, `isReferencedBy`, `isDerivedFrom`, or `isCitedBy` where the related identifier type is `DOI` or `URL` — these point to the paper. A record whose primary DOI resolves to a data repository page is a *data deposit DOI*, not a paper DOI; always resolve to the publication DOI before creating the project.
+3. If a paper DOI is found via `related_identifiers` but no PMID: search PubMed with `"{doi}"[doi]`
+4. If DOI in record metadata but no PMID and no `related_identifiers` paper link: search PubMed with `"{doi}"[doi]`
+5. If neither: search PubMed by title (first 8 words as `[tiab]`)
+6. If PMID found: use paper title as project name, group all datasets from the same paper into one project
+7. If no publication found: **search bioRxiv** using key terms from the accession (mouse model name, assay method, PI institution, disease type from `config/keywords.yaml`). ENA/ArrayExpress datasets without a PMID frequently have an associated preprint posted after data submission. If a preprint is found, use it for studyLeads, doi, and wiki.
+8. If still no publication/preprint: use repository record title, note as possible preprint
 
 ### Deriving the study investigator / PI field
 
