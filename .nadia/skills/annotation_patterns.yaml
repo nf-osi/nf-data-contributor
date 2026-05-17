@@ -541,3 +541,146 @@ patterns:
     source: fix
     issues: [23]
     added: "2026-05-03"
+
+  - pattern: "dedup-check-synapse-projects-not-only-portal-table"
+    rule: >
+      The portal Studies table (e.g. syn52694652) only contains projects that have
+      been registered into the portal scope — it does NOT include projects that a
+      data manager is still actively curating. Manually-curated projects in
+      Synapse may exist for weeks before they appear in the Studies table or have
+      `alternateDataRepository` populated. Relying on the Studies table alone for
+      dedup will miss these and produce duplicate projects.
+      Before classifying a publication group as NEW, perform a SECOND dedup pass
+      against existing Synapse projects directly:
+        1. For each accession in the publication group, query the portal Files
+           table (e.g. syn16858331 or the configured `files_table_id`) for any
+           file whose name or annotations mention the accession. If found, the
+           accession is already provisioned somewhere — switch to ADD outcome
+           targeting that project, or mark as SKIP if the accession is already
+           fully present.
+        2. Search Synapse for projects whose name has fuzzy overlap with the
+           publication title (TF-IDF cosine ≥ 0.85 or Jaccard ≥ 0.50). Use
+           `syn.restGET('/entity/child', params={'parentId': team_project_root})`
+           or `syn.findEntityId(name, parent)` style lookups in the data manager
+           team's project listing.
+        3. If a candidate match is found, treat the group as ADD (add the new
+           accession to the existing project) rather than NEW. Flag in the
+           GitHub issue that the existing project may need its
+           `alternateDataRepository` updated.
+      Issue #296: NADIA created syn74314777 for "Selumetinib in adults with NF1
+      and inoperable plexiform neurofibroma - a phase 2 trial" while a manually-
+      curated syn74306112 with the same title (minus a hyphen) and the same
+      PRIDE PXD043034 accession already existed. The portal Studies table did
+      not yet contain syn74306112, so the existing dedup logic returned NEW.
+      The fix was a manual annotation-migration across both projects — costly.
+    source: fix
+    issues: [296]
+    added: "2026-05-17"
+
+  - pattern: "dbgap-srarun-table-csv-per-file-annotation"
+    rule: >
+      When a dbGaP study has an associated SRA Run Table (committed at repo root
+      as `SraRunTable.csv`, or fetchable from the NCBI Trace UI), use it as the
+      primary structured source for per-file annotations on every SRA run.
+      Confirmed-working ingest pattern (Issue #295, 854 file entities created):
+        1. Fetch ENA filereport for the SRP/PRJ accession (or read fastq paths
+           from the run table). For paired-end runs, create TWO File entities per
+           SRR — one for `_1.fastq.gz` and one for `_2.fastq.gz`. For
+           dbGaP-controlled data, the ENA FASTQ URL is the canonical anchor even
+           when it returns 404 to unauthorized clients — authorized users use
+           SRA Toolkit + dbGaP auth to retrieve actual bytes. Create the File
+           entity with `synapseStore=False` and `path=<ENA FASTQ URL>`.
+        2. Match each File entity to its CSV row by extracting the SRR accession
+           from the filename and looking up the "Run" column.
+        3. Apply per-file annotations from the CSV columns (always validate
+           against schema enums first):
+             - `assay` from "Assay Type" — confirmed enum mappings:
+                 AMPLICON     → "next generation targeted sequencing"
+                 Bisulfite-Seq → "bisulfite sequencing"
+                 RNA-Seq       → "RNA-seq"
+                 WGA           → "whole genome sequencing"
+                 WXS           → "whole exome sequencing"
+             - `species` from "Organism" (verbatim, e.g. Homo sapiens)
+             - `sex` from "sex" (male→Male, female→Female, blank→omit)
+             - `platform` from "Instrument" (omit + flag when value not in
+               schema enum, e.g. DNBSEQ-G400)
+             - `fileFormat` from filename (strip .gz)
+             - `individualID` from "submitted_subject_id"
+             - `specimenID` from "Sample Name"  (NOT the SRR)
+             - `nucleicAcidSource` from "LibrarySource"
+             - `libraryPreparationMethod` from "LibrarySelection" (often
+               unmapped — set to `unknown` and flag)
+             - `runType` from "LibraryLayout" (PAIRED → pairedEnd)
+             - `readPair` from filename (`_1` → 1, `_2` → 2)
+             - `tumorType` / `diagnosis` from "Is_Tumor" (Yes → study-specific
+               tumor label; No → "Not Applicable")
+        4. Create a single Dataset entity for the dbGaP study and link all
+           created File entities. Bind a schema that covers ALL library
+           strategies present in the run table (e.g. `nf-genomicsassaytemplate`
+           when a mix of AMPLICON/Bisulfite/WGA/WXS/RNA-Seq is present), not a
+           single-strategy template.
+        5. Mint the Dataset snapshot in Phase 3, after Phase 2 gap-fill —
+           consistent with `dataset-version-phase3-only`.
+    source: confirmed
+    issues: [295]
+    added: "2026-05-17"
+
+  - pattern: "nadia-fix-permission-probe-non-nadia-projects"
+    rule: >
+      When a `/nadia fix` command targets a Synapse project that NADIA did NOT
+      create (e.g. a manually-curated portal project, or any project where the
+      original outcome was `existing`), nadia-bot (principal `3581191`) may not
+      be on the project ACL and may not be a member of the NF-OSI Sage Team
+      (`3378999`) that has team-level access.
+      Before doing any writes (folder create, File store, annotation PUT),
+      perform a non-destructive permission probe:
+        1. Try `syn.restPOST('/entity', {parentId: target_id, ...minimal entity...})`
+           with a short-lived test folder OR call `syn.restGET('/entity/{id}/permissions')`
+           to read the ACL and check whether the agent principal is included with
+           CREATE/UPDATE.
+        2. On 403 / lacks CREATE: post a structured blocker comment on the
+           study-review issue listing:
+              - The principal ID that needs access (`nadia-bot` = `3581191`)
+              - The two options: add the principal to the project ACL, or add
+                to the NF-OSI Sage Team
+              - Everything that is ready to run once access is granted (count
+                of entities to create, schema URI, annotation plan)
+           Do NOT attempt the writes — surface the blocker clearly and exit
+           gracefully so the data manager can grant access and re-trigger.
+      Issue #295 demonstrated this is the desired safety behaviour: the bot
+      reported "403 Client Error: You lack CREATE access" along with the
+      complete prepared plan, and the data manager granted permission and
+      retriggered. Compare to silently failing mid-task with partial writes.
+    source: confirmed
+    issues: [295]
+    added: "2026-05-17"
+
+  - pattern: "raw-data-folder-mismatch-stop-and-ask"
+    rule: >
+      Before applying per-file annotations from a specified CSV/manifest to an
+      existing Raw Data folder, FIRST walk the folder tree and verify that the
+      files present match the expected mapping target. If a data manager points
+      `/nadia fix` at folder X with instructions to annotate from dbGaP run
+      table Y, but the folder actually contains GEO/GTEx/PRIDE files (no SRR*
+      tokens in any filename), do NOT apply the annotations — applying the
+      wrong mapping is worse than leaving the files unannotated.
+      Required pre-flight check before any per-file annotation pass:
+        1. Walk the target folder and list every filename.
+        2. Compare against the manifest's key column (e.g. the "Run" column in
+           SraRunTable.csv, or `sample_id` in a metadata manifest).
+        3. If zero filenames map to manifest rows, abort and post a blocker
+           comment listing:
+              - The actual file contents found (with source repository inferred
+                from filename prefix where possible)
+              - The expected manifest key column and a few example rows
+              - Three concrete options for the data manager (re-scope to actual
+                files, point at the correct folder, or stage the missing files)
+        4. If only a partial subset maps, proceed only on the matching subset
+           and explicitly list the unmapped files in the curation comment.
+      Issue #295 demonstrated this was the desired behaviour: NADIA recognized
+      the Raw Data folder contained GSE111895/GTEx/PXD052910 files (not SRP376702
+      SRA runs), reported the mismatch with the three resolution options, and
+      waited for the data manager to clarify.
+    source: confirmed
+    issues: [295]
+    added: "2026-05-17"

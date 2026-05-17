@@ -124,7 +124,15 @@ Write and run `{WORKSPACE_DIR}/dedup.py`:
 4. Classify each remaining group as NEW, ADD, or SKIP using the three-outcome logic in CLAUDE.md:
    - **PMID match** (exact) → strongest signal for ADD or SKIP
    - **DOI match** (case-insensitive)
-   - **Accession match** in portal files table
+   - **Accession match in portal Studies table** (`alternateDataRepository`)
+   - **Accession match in portal Files table** (`files_table_id` from config) — check that no existing file references any accession from the group in its name or annotations. This catches manually-curated projects whose `alternateDataRepository` hasn't been populated yet (Issue #296). Query pattern:
+     ```python
+     for acc in [d['accession_id'] for d in group['datasets']]:
+         q = f"SELECT id, parentId, name FROM {files_table_id} WHERE name LIKE '%{acc}%' LIMIT 5"
+         hits = syn.tableQuery(q).asDataFrame()
+         if len(hits) > 0:
+             # parentId resolves to an existing project — switch to ADD or SKIP
+     ```
    - **Fuzzy title** (TF-IDF cosine ≥ 0.85 = match; 0.70–0.84 = near-match warning, treat as NEW)
 5. Save to `{WORKSPACE_DIR}/dedup_results.json`
 6. Print:
