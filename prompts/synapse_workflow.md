@@ -933,42 +933,65 @@ def build_data_access_section(accessions: list[str], citation_info: dict) -> str
     """
     Build the ## Data Access and Citation wiki section.
 
+    The content between NADIA-ACK markers is written as HTML — the portal's
+    acknowledgementStatements field renders HTML, so use <p>, <a>, <blockquote>
+    rather than plain text or Markdown links. Raw URLs in plain text wrap badly
+    and look ugly; always use <a href="...">display text</a> for any link.
+
     citation_info keys (all optional):
       'citation'    – full formatted citation string for the dataset deposit
+      'citation_url'– DOI or URL for the citation (linked from the citation text)
       'policy_url'  – URL to the repository's data usage policy
-      'policy_name' – human-readable name of the policy (e.g. 'TCIA Data Usage Policy')
+      'policy_name' – human-readable link text for the policy (e.g. 'TCIA Data Usage Policy')
       'repo_name'   – repository display name (e.g. 'The Cancer Imaging Archive (TCIA)')
 
     If citation_info is empty, the section still records the NF Portal statement
     so provisioning always gets something meaningful.
     """
-    lines = ['## Data Access and Citation', '', '<!-- NADIA-ACK-START -->']
+    import html as html_mod
 
-    citation    = citation_info.get('citation', '')
-    policy_url  = citation_info.get('policy_url', '')
-    policy_name = citation_info.get('policy_name', 'Data Usage Policy')
-    repo_name   = citation_info.get('repo_name', '')
+    citation     = citation_info.get('citation', '')
+    citation_url = citation_info.get('citation_url', '')
+    policy_url   = citation_info.get('policy_url', '')
+    policy_name  = citation_info.get('policy_name', 'Data Usage Policy')
+    repo_name    = citation_info.get('repo_name', '')
+
+    ack_parts = []
 
     if citation:
-        lines += ['Please cite this dataset as follows:', '', citation, '']
+        # Append linked DOI at end of citation if url provided, else plain citation
+        safe_cite = html_mod.escape(citation)
+        if citation_url:
+            safe_url = html_mod.escape(citation_url)
+            cite_html = f'{safe_cite} <a href="{safe_url}">{safe_url}</a>'
+        else:
+            cite_html = safe_cite
+        ack_parts.append(f'<p>Please cite this dataset as follows:</p>\n<p>{cite_html}</p>')
 
     if repo_name and policy_url:
-        lines.append(
-            f'This dataset is hosted by [{repo_name}]. '
+        safe_repo   = html_mod.escape(repo_name)
+        safe_policy = html_mod.escape(policy_url)
+        safe_name   = html_mod.escape(policy_name)
+        ack_parts.append(
+            f'<p>This collection is hosted by {safe_repo}. '
             f'By downloading or using these data, you agree to the '
-            f'[{policy_name}]({policy_url}).'
+            f'<a href="{safe_policy}">{safe_name}</a>.</p>'
         )
-        lines.append('')
 
-    lines += [
-        'Additionally, please include the following statement in your acknowledgements '
-        'to help us track the usage and impact of the NF Data Portal:',
-        '',
-        NF_PORTAL_STATEMENT,
-        '',
-        '<!-- NADIA-ACK-END -->',
-    ]
-    return '\n'.join(lines)
+    ack_parts.append(
+        '<p>Additionally, please include the following statement in your acknowledgements '
+        'to help us track the usage and impact of the NF Data Portal:</p>\n'
+        '<blockquote><p>&ldquo;Data were identified through the NF Data Portal '
+        '(<a href="http://www.nf.synapse.org">http://www.nf.synapse.org</a>, '
+        'RRID:SCR_021683).&rdquo;</p></blockquote>'
+    )
+
+    ack_html = '\n\n'.join(ack_parts)
+
+    return (
+        '## Data Access and Citation\n\n'
+        f'<!-- NADIA-ACK-START -->\n{ack_html}\n<!-- NADIA-ACK-END -->'
+    )
 ```
 
 ### Repository-specific citation lookup
