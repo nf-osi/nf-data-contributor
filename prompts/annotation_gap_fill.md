@@ -112,6 +112,42 @@ Fields specific to mouse models, cell lines, organoids: model species, model sex
 
 These are machine-readable, per-sample, highly reliable. Always attempt Tier 1 sources first.
 
+### Depositor-provided metadata files (highest priority within Tier 1)
+
+Many data deposits include a structured metadata file alongside the data files — a sample manifest, README, or annotation spreadsheet provided directly by the study authors. **These are ground truth and take priority over inferred or repository-derived values.** Check for these files before querying ENA/BioSample:
+
+- Zenodo, Figshare, Dryad, OSF: list files in the deposit and look for `Sample_list.xlsx`, `README.md`, `metadata.tsv`, `sample_metadata.csv`, `samplesheet.csv`, or similarly named files
+- GEO: supplementary files at `GSE*_RAW.tar` are typically processed data, but `GSE*_metadata.xlsx` or `GSE*_sample_info.csv` are sample manifest candidates — always scan `suppFile` from the series summary
+- TCIA: collection pages often link to a clinical spreadsheet (e.g., `clinical_data.xlsx`)
+
+```python
+def scan_for_depositor_metadata(deposit_files: list[dict]) -> list[dict]:
+    """
+    Given a list of file dicts from a repository (Zenodo, GEO suppl, etc.),
+    return any that appear to be depositor-provided sample/specimen metadata tables.
+    Priority: xlsx > csv/tsv > txt files named with 'sample', 'metadata', 'manifest',
+    'annotation', 'clinical', 'readme', 'samplesheet'.
+    """
+    METADATA_PATTERNS = [
+        'sample', 'metadata', 'manifest', 'annotation', 'clinical',
+        'readme', 'samplesheet', 'sample_list', 'sample_info'
+    ]
+    TABULAR_EXTS = {'.xlsx', '.xls', '.csv', '.tsv', '.txt'}
+    candidates = []
+    for f in deposit_files:
+        name = (f.get('filename') or f.get('key') or f.get('name') or '').lower()
+        ext = next((e for e in TABULAR_EXTS if name.endswith(e)), None)
+        if ext and any(p in name for p in METADATA_PATTERNS):
+            candidates.append(f)
+    # Sort: xlsx first, then csv/tsv, then txt
+    return sorted(candidates, key=lambda f: (
+        0 if f.get('filename','').lower().endswith(('.xlsx','.xls')) else
+        1 if f.get('filename','').lower().endswith(('.csv','.tsv')) else 2
+    ))
+```
+
+Download and parse any candidates with `try_download_and_parse_table()` (Tier 2 section). Map table rows to files via specimen/sample ID columns using `find_sample_metadata_table()`. Values from these files override any subsequent Tier 1 API-derived values.
+
 ### ENA filereport (comprehensive column list)
 
 The filereport endpoint returns far more than what's typically fetched. Request ALL columns:

@@ -236,18 +236,59 @@ print(f"  Schema bound: {schema_uri}")
 
 ### Step 6 — Mint a stable snapshot version of the Dataset
 
-After all annotations are confirmed correct, mint a stable version of the Dataset entity. This gives data managers a permanent, citable snapshot:
+After all annotations are confirmed correct, mint a stable version of the Dataset entity. This gives data managers a permanent, citable snapshot.
+
+> **IMPORTANT:** `POST /entity/{id}/version` returns 405 for Dataset entities — do NOT use it.
+> Dataset entities are a subtype of EntityView and require the async table transaction endpoint.
 
 ```python
-import json
+import json, time, httpx
 
-# Snapshot the Dataset — creates a permanent version number
-snapshot_response = syn.restPOST(
-    f'/entity/{dataset_id}/version',
-    json.dumps({'label': 'v1', 'comment': 'Initial stable version from NADIA ingestion'})
+def mint_dataset_snapshot(syn, dataset_id: str, label: str, comment: str) -> int:
+    """
+    Mint a stable snapshot of a Dataset entity via the async table transaction endpoint.
+    Returns the snapshot version number.
+    """
+    token = os.environ['SYNAPSE_AUTH_TOKEN']
+    headers = {'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'}
+    base = 'https://repo-prod.prod.sagebase.org/repo/v1'
+
+    txn_body = {
+        'concreteType': 'org.sagebionetworks.repo.model.table.TableUpdateTransactionRequest',
+        'entityId': dataset_id,
+        'changes': [],
+        'createSnapshot': True,
+        'snapshotOptions': {
+            'concreteType': 'org.sagebionetworks.repo.model.table.SnapshotRequest',
+            'snapshotLabel': label,
+            'snapshotComment': comment[:256],  # 256-char limit on comment
+        }
+    }
+    resp = httpx.post(
+        f'{base}/entity/{dataset_id}/table/transaction/async/start',
+        headers=headers, json=txn_body, timeout=30
+    )
+    resp.raise_for_status()
+    # Response is synchronous for snapshot-only transactions (no changes[])
+    # snapshotVersionNumber is in the immediate response
+    data = resp.json()
+    snapshot_version = data.get('snapshotVersionNumber')
+    if snapshot_version:
+        print(f"  Dataset snapshot minted: {dataset_id}.{snapshot_version} (label={label})")
+        return snapshot_version
+    raise RuntimeError(f"Unexpected snapshot response: {data}")
+
+
+# Usage — determine next available label before calling:
+versions = syn.restGET(f'/entity/{dataset_id}/version')
+existing = [v.get('versionLabel', '') for v in versions.get('results', [])]
+existing_nums = [v.get('versionNumber', 0) for v in versions.get('results', [])]
+next_label = f'v{max(existing_nums, default=0) + 1}'
+
+snapshot_version = mint_dataset_snapshot(
+    syn, dataset_id, label=next_label,
+    comment='Initial stable version from NADIA ingestion'
 )
-snapshot_version = snapshot_response.get('versionNumber', 1)
-print(f"  Dataset snapshot minted: {dataset_id}.{snapshot_version}")
 ```
 
 **Required order within create_project.py:**
@@ -518,7 +559,7 @@ def fetch_pubmed_full(pmid: str) -> dict:
         'mesh_terms': [str(m['DescriptorName']) for m in citation.get('MeshHeadingList', [])],
         'grants': [str(g.get('Agency', '')) for g in article.get('GrantList', [])],
         'authors': [
-            f"{a.get('LastName', '')} {a.get('ForeName', '')}".strip()
+            f"{a.get('ForeName', '')} {a.get('LastName', '')}".strip()
             for a in article.get('AuthorList', [])
         ],
         'affiliations': [
@@ -1353,7 +1394,7 @@ These issues were discovered when the audit was run on real agent-created projec
 
     Examples of **sufficient** names: `"RNA-seq — peripheral blood mononuclear cells, treatment vs. control (GEO GSE120686)"`, `"ChIP-seq H3K27ac — Schwann cells (ENA PRJEB12345)"`, `"Whole exome sequencing — patient-derived xenograft lines (SRA SRP123456)"`
 
-17. **Mint a stable Dataset version after all annotations are final** — After creating or updating a Dataset and confirming all annotations are correct, call `syn.restPOST(f'/entity/{dataset_id}/version', ...)` to mint a permanent snapshot. This gives data managers a stable, citable version to reference. Data managers will request this explicitly if it is missing. The polish workflow (Step 7) and the daily creation workflow both must mint versions as a final step after annotations are confirmed.
+17. **Mint a stable Dataset version after all annotations are final** — After creating or updating a Dataset and confirming all annotations are correct, use `mint_dataset_snapshot()` (see Step 6 above) to mint a permanent snapshot via the async table transaction endpoint. **Do not use `syn.restPOST('/entity/{id}/version', ...)` — that endpoint returns 405 for Dataset entities.** Data managers will request this explicitly if it is missing. The polish workflow (Step 7) and the daily creation workflow both must mint versions as a final step after annotations are confirmed.
 
 18. **Sample-varying fields set to a single study-level value on all files** — After initial annotation, check whether any field that can vary by sample (genotype, condition, sex, age, tissue, cell type, preparation method, or any treatment/perturbation field) has the same value on every file in the dataset. If the study has multiple experimental groups, this is almost always wrong — the study-level value was copied to all files instead of mapping each file to its source sample. Fix by: (a) fetching the per-sample metadata record for each file's run/sample accession, (b) mapping each file to its sample, (c) re-applying those fields per-file with the correct per-sample value. This is the second thing to check in the audit after mechanical field presence — it is a correctness error, not just a completeness gap. → Standard 5
 

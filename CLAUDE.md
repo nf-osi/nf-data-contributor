@@ -782,6 +782,23 @@ Read `curation_checklist.required_dataset_annotations` from config for the full 
 | Publication title | Full title of the publication |
 | Study leads | List of investigators (first + corresponding author) |
 
+### 15 — Spatial transcriptomics deposits: one Dataset entity, not two
+
+Spatial transcriptomics (10x Visium, Slide-seq, MERFISH, etc.) deposits bundle imaging files and sequencing files in a single repository record. Even though imaging and sequencing files use different metadata schemas, create **one Dataset entity** covering all files in the deposit. Portal users expect to find the full bundle together — splitting into an "imaging" dataset and a "sequencing" dataset breaks the logical unit and confuses data discovery.
+
+Both files folders (imaging and sequencing) can each have a different schema bound to them — schema binding is on the folder, not the Dataset. The single Dataset entity's items list includes files from both folders, and its columnIds are the union of all annotation keys from both sets of files.
+
+### 16 — Repository-specific citation and data usage requirements
+
+Some repositories have specific citation requirements beyond citing the paper. These must be written into the project wiki under a `## Data Access and Citation` section, wrapped in `<!-- NADIA-ACK-START -->` / `<!-- NADIA-ACK-END -->` markers. The provisioning script reads these markers and uses the content as the portal `acknowledgementStatements` — overriding the generic boilerplate. **Always write HTML in the ACK markers** (use `<p>`, `<a href="...">link text</a>`, `<blockquote>`), not plain text or Markdown, because the portal field renders HTML.
+
+Known repositories with specific requirements:
+- **TCIA**: Must cite both the specific collection (DOI) and link to the [TCIA Data Usage Policy](https://wiki.cancerimagingarchive.net/display/Public/TCIA+Application+Programming+Interface+%28API%29+Guides#TCIAApplicationProgrammingInterface(API)Guides-TCIADataUsagePolicy). Look up the collection citation from the landing page `https://www.cancerimagingarchive.net/collection/{collection_name}`.
+- **Dryad**: CC0 datasets require a formatted citation including the Dryad DOI.
+- **Zenodo**: Auto-generate citation from the record's creators, year, title, and DOI fields via the API.
+
+See `prompts/synapse_workflow.md` → "Data Access and Citation Section" for `build_data_access_section()` and `get_citation_info()` implementations.
+
 ---
 
 ## `alternateDataRepository` — Bioregistry Prefixes
@@ -811,6 +828,7 @@ Format: `{prefix}:{accession_id}`. One entry per repository accession. Set as a 
 | TIB (German Nat. Library) | `tib` | `tib:10.57702/4hwx66p6` |
 | Cell Image Library | `cil` | `cil:47049` |
 | NCI GDC | `gdc` | `gdc:TCGA-SARC` |
+| TCIA | `tcia.collection` | `tcia.collection:Vestibular-Schwannoma-SEG` |
 
 Do NOT add `pubmed:{pmid}` — PubMed is not a data repository.
 
@@ -827,6 +845,7 @@ REPO_TO_PREFIX = {
     'cBioPortal': 'cbioportal', 'Dryad': 'dryad',
     'Science Data Bank': 'scidb', 'TIB': 'tib',
     'Cell Image Library': 'cil', 'NCI GDC': 'gdc',
+    'TCIA': 'tcia.collection',
 }
 
 alternate_data_repos = []
