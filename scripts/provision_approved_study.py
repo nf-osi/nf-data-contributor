@@ -263,6 +263,37 @@ ACKNOWLEDGEMENT_STATEMENTS = (
     "(http://www.nf.synapse.org, RRID:SCR_021683).\""
 )
 
+# Markers NADIA writes into the wiki when repository-specific citation requirements exist.
+# The provisioning script reads between these markers and uses the content as
+# acknowledgementStatements, overriding the generic boilerplate above.
+ACK_MARKER_START = "<!-- NADIA-ACK-START -->"
+ACK_MARKER_END   = "<!-- NADIA-ACK-END -->"
+
+
+def _extract_wiki_ack(syn, project_id):
+    """
+    Read the project wiki and extract content between NADIA-ACK markers.
+    Returns the extracted string, or None if no markers are present.
+
+    NADIA writes these markers during curation whenever a repository has specific
+    citation or data usage requirements (e.g. TCIA, dbGaP, restricted-access repos).
+    The markers survive the review period so curators can edit the text, and
+    provisioning reads the final human-reviewed content.
+    """
+    import re
+    try:
+        wiki = syn.getWiki(project_id)
+        match = re.search(
+            rf"{re.escape(ACK_MARKER_START)}\s*(.*?)\s*{re.escape(ACK_MARKER_END)}",
+            wiki.markdown,
+            re.DOTALL,
+        )
+        if match:
+            return match.group(1).strip()
+    except Exception:
+        pass
+    return None
+
 
 def step4_upsert_long_text(syn, project_id, metadata, long_text_table_id):
     """
@@ -271,8 +302,11 @@ def step4_upsert_long_text(syn, project_id, metadata, long_text_table_id):
     Columns: studyId (ENTITYID), summary (LARGETEXT), accessRequirements (LARGETEXT),
              acknowledgementStatements (LARGETEXT)
 
-    The summary is built from available metadata. accessRequirements and
-    acknowledgementStatements use the standard NADIA boilerplate.
+    acknowledgementStatements priority:
+      1. Content between <!-- NADIA-ACK-START --> / <!-- NADIA-ACK-END --> in the wiki
+         — written by NADIA when the source repository has specific citation requirements,
+           then reviewed and optionally edited by the data manager during review.
+      2. Generic boilerplate (ACKNOWLEDGEMENT_STATEMENTS) as fallback.
     """
     import pandas as pd
 
@@ -292,8 +326,16 @@ def step4_upsert_long_text(syn, project_id, metadata, long_text_table_id):
         summary_parts.append(f"Source publication: https://doi.org/{doi}")
     summary = " ".join(summary_parts)
 
+    # Resolve acknowledgement text: wiki markers take priority over boilerplate
+    wiki_ack = _extract_wiki_ack(syn, project_id)
+    if wiki_ack:
+        ack_text = wiki_ack
+        print(f"  Using wiki-sourced acknowledgement (NADIA-ACK markers found)")
+    else:
+        ack_text = ACKNOWLEDGEMENT_STATEMENTS
+        print(f"  Using generic acknowledgement boilerplate (no NADIA-ACK markers in wiki)")
+
     try:
-        # Check for existing row
         existing = syn.tableQuery(
             f"SELECT * FROM {long_text_table_id} WHERE studyId = '{project_id}'"
         )
@@ -303,13 +345,12 @@ def step4_upsert_long_text(syn, project_id, metadata, long_text_table_id):
             "studyId": project_id,
             "summary": summary,
             "accessRequirements": ACCESS_REQUIREMENTS,
-            "acknowledgementStatements": ACKNOWLEDGEMENT_STATEMENTS,
+            "acknowledgementStatements": ack_text,
         }
 
         if not df_existing.empty:
-            # Update in place — preserve any existing summary if curator wrote one
-            df_existing["accessRequirements"]    = ACCESS_REQUIREMENTS
-            df_existing["acknowledgementStatements"] = ACKNOWLEDGEMENT_STATEMENTS
+            df_existing["accessRequirements"]       = ACCESS_REQUIREMENTS
+            df_existing["acknowledgementStatements"] = ack_text
             if not df_existing["summary"].iloc[0]:
                 df_existing["summary"] = summary
             syn.store(synapseclient.Table(long_text_table_id, df_existing))

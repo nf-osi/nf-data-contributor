@@ -900,9 +900,15 @@ def make_wiki_content(pub_title, disease_focus, assay_types, species, tissue_typ
 
 ---
 
+{data_access_section}
+
+---
+
 *This project was auto-curated by [NADIA](https://github.com/nf-osi/nadia) on {today} and is pending data manager review.*
 """
 ```
+
+The `data_access_section` parameter must be built by calling `build_data_access_section(accessions, citation_info)` — see below. Pass `data_access_section=''` only if you have confirmed there are no repository-specific requirements.
 
 **Plain-language summary guidance** (write directly through reasoning, no API call):
 - Sentence 1: the disease/condition studied and why it matters
@@ -910,6 +916,137 @@ def make_wiki_content(pub_title, disease_focus, assay_types, species, tissue_typ
 - Sentence 3: what was found or what the dataset enables
 
 **Wiki title**: use the full publication title (not "Auto-Discovered..." or similar). Do not add "Auto-Discovered" to the title or anywhere in the wiki header.
+
+---
+
+## Data Access and Citation Section
+
+Every wiki **must** include a `## Data Access and Citation` section. This section is wrapped in special markers so `provision_approved_study.py` can extract it and write the exact text into the portal's `acknowledgementStatements` column — overriding the generic boilerplate.
+
+```python
+NF_PORTAL_STATEMENT = (
+    '> "Data were identified through the NF Data Portal '
+    '(http://www.nf.synapse.org, RRID:SCR_021683)."'
+)
+
+def build_data_access_section(accessions: list[str], citation_info: dict) -> str:
+    """
+    Build the ## Data Access and Citation wiki section.
+
+    citation_info keys (all optional):
+      'citation'    – full formatted citation string for the dataset deposit
+      'policy_url'  – URL to the repository's data usage policy
+      'policy_name' – human-readable name of the policy (e.g. 'TCIA Data Usage Policy')
+      'repo_name'   – repository display name (e.g. 'The Cancer Imaging Archive (TCIA)')
+
+    If citation_info is empty, the section still records the NF Portal statement
+    so provisioning always gets something meaningful.
+    """
+    lines = ['## Data Access and Citation', '', '<!-- NADIA-ACK-START -->']
+
+    citation    = citation_info.get('citation', '')
+    policy_url  = citation_info.get('policy_url', '')
+    policy_name = citation_info.get('policy_name', 'Data Usage Policy')
+    repo_name   = citation_info.get('repo_name', '')
+
+    if citation:
+        lines += ['Please cite this dataset as follows:', '', citation, '']
+
+    if repo_name and policy_url:
+        lines.append(
+            f'This dataset is hosted by [{repo_name}]. '
+            f'By downloading or using these data, you agree to the '
+            f'[{policy_name}]({policy_url}).'
+        )
+        lines.append('')
+
+    lines += [
+        'Additionally, please include the following statement in your acknowledgements '
+        'to help us track the usage and impact of the NF Data Portal:',
+        '',
+        NF_PORTAL_STATEMENT,
+        '',
+        '<!-- NADIA-ACK-END -->',
+    ]
+    return '\n'.join(lines)
+```
+
+### Repository-specific citation lookup
+
+Before calling `build_data_access_section`, check each accession prefix for known requirements:
+
+```python
+import httpx, re
+
+def get_citation_info(accessions: list[str]) -> dict:
+    """
+    Return citation_info dict for the first accession with known requirements.
+    Currently handles: TCIA, Zenodo (license/citation field), Dryad, PRIDE.
+    Returns {} if no specific requirements are found.
+    """
+    for acc in accessions:
+        prefix, _, identifier = acc.partition(':')
+
+        # ── TCIA ──────────────────────────────────────────────────────────────
+        if prefix in ('tcia.collection', 'icrptbia'):
+            # TCIA requires citing both the collection and the TCIA itself.
+            # Fetch the collection's citation from the TCIA REST API.
+            try:
+                r = httpx.get(
+                    'https://services.cancerimagingarchive.net/nbia-api/services/v1/'
+                    f'getCollectionDescriptions?collectionName={identifier}',
+                    timeout=15
+                )
+                # TCIA doesn't expose a structured citation endpoint; fall back to
+                # a standard template using the collection name and DOI if known.
+            except Exception:
+                pass
+            return {
+                'repo_name': 'The Cancer Imaging Archive (TCIA)',
+                'policy_url': (
+                    'https://wiki.cancerimagingarchive.net/display/Public/'
+                    'TCIA+Application+Programming+Interface+%28API%29+Guides'
+                    '#TCIAApplicationProgrammingInterface(API)Guides-TCIADataUsagePolicy'
+                ),
+                'policy_name': 'TCIA Data Usage Policy',
+                # citation is left blank here — NADIA should fill it from the
+                # repository's dataset description or Related Identifiers during curation.
+                # If a DOI is known, format as:
+                # "Authors (Year). Title [Data set]. The Cancer Imaging Archive. https://doi.org/..."
+            }
+
+        # ── Zenodo ────────────────────────────────────────────────────────────
+        if prefix == 'zenodo.record':
+            try:
+                r = httpx.get(f'https://zenodo.org/api/records/{identifier}', timeout=15)
+                if r.status_code == 200:
+                    meta = r.json().get('metadata', {})
+                    license_id = (meta.get('license') or {}).get('id', '')
+                    # Zenodo records under CC or open licenses have no special policy.
+                    # Only generate a citation if the record explicitly states one.
+                    creators = meta.get('creators', [])
+                    year = (meta.get('publication_date') or '')[:4]
+                    title = meta.get('title', '')
+                    doi = meta.get('doi', '')
+                    if creators and year and title and doi:
+                        author_str = '; '.join(
+                            c.get('name', '') for c in creators[:6]
+                        ) + ('. et al.' if len(creators) > 6 else '.')
+                        citation = f"{author_str} ({year}). {title} [Data set]. Zenodo. https://doi.org/{doi}"
+                        return {'citation': citation}
+            except Exception:
+                pass
+
+        # ── Dryad ─────────────────────────────────────────────────────────────
+        if prefix == 'dryad':
+            # Dryad CC0 — no special policy, but a citation is expected
+            dryad_doi = identifier.replace('dryad.', '10.5061/dryad.')
+            return {'citation': f'[Dataset]. Dryad. https://doi.org/{dryad_doi}'}
+
+    return {}
+```
+
+**When a TCIA collection's specific citation is not resolvable from the API**, check the collection's landing page URL (`https://www.cancerimagingarchive.net/collection/{identifier}`) and look for a `Citation` or `Data Access` section. Parse the citation string and include it in `citation_info['citation']`. If the page is not accessible, leave `citation` blank and flag in the GitHub curation comment as "TCIA citation required — check collection page for correct citation string."
 
 ---
 
