@@ -662,6 +662,26 @@ def inspect_count_matrix_header(url_or_path: str, max_bytes: int = 4096) -> list
 
 ---
 
+## Schema Field Name Validation
+
+**Before writing any annotation to a File entity, verify the field name exists in the bound schema.** Never write field names that are absent from `fetch_schema_properties(schema_uri)`. Common mistakes:
+
+- `modelSex`, `modelAge`, `modelAgeUnit`, `modelSpecies` — these are not defined in any standard template; use `sex`, `age`, `ageUnit`, `species` instead (if those exist in the schema)
+- `externalRepository`, `externalAccessionID` — these may exist in some templates but not others; check the schema
+- Custom annotation names invented to fill gaps — if a field doesn't exist in the schema, document the gap in the curation comment rather than inventing a name
+
+A field written under the wrong name is silently ignored by validation, never appears in Dataset views, and requires manual data manager cleanup. The schema is the authoritative list of valid field names.
+
+```python
+# Before writing any annotation:
+schema_props = fetch_schema_properties(schema_uri)
+valid_fields = set(schema_props.keys())
+for field_name in annotations_to_write:
+    if field_name not in valid_fields:
+        print(f"  SKIP non-schema field: {field_name}")
+        gap_report['gap_not_applicable'].append(f"{field_name}: not in schema")
+```
+
 ## Validation and Enum Matching
 
 Before applying any value extracted from any source, validate it against the field's schema constraints:

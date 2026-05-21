@@ -799,6 +799,38 @@ Known repositories with specific requirements:
 
 See `prompts/synapse_workflow.md` → "Data Access and Citation Section" for `build_data_access_section()` and `get_citation_info()` implementations.
 
+### 17 — TCIA collections: enumerate per-series file entities, not zip files
+
+When a deposit is hosted on The Cancer Imaging Archive (TCIA), do NOT create file entities pointing to bulk zip archives. Instead create one Synapse File entity per TCIA series, using the NBIA REST API series download URL:
+
+```
+https://nbia.cancerimagingarchive.net/nbia-api/services/v1/getImage?SeriesInstanceUID={uid}
+```
+
+Fetch all series via `GET /getSeries?Collection={collection_name}`. Use the `PatientID`, `SeriesDescription`, and the last 8 characters of the `SeriesInstanceUID` to construct a human-readable filename like `{PatientID}_{SeriesDescription}_{uid_suffix}.dcm.zip`. Set `fileFormat=DICOM` on each file entity (the content is DICOM even though it downloads as a zip). Set `specimenID=PatientID` and `individualID=PatientID`.
+
+This applies even if the same data is also available as a zip archive from Zenodo or another repository — prefer TCIA series-level links for DICOM imaging data because they are individually addressable, directly auditable, and do not require extraction.
+
+### 18 — Non-schema field names must be validated before writing
+
+Before setting any annotation on a File entity, verify that the field name exists in the bound schema by calling `fetch_schema_properties(schema_uri)`. Never write field names that are not defined in the schema (e.g., `modelSex`, `modelSpecies`, `modelSystemName`, `modelAge`, `modelAgeUnit` are not fields in any standard template — use `sex`, `species`, `modelSystemName` if present in the schema, and `age`/`ageUnit`).
+
+This is a recurring source of errors. A field set under the wrong name does not appear in the Dataset view, silently fails validation, and requires manual cleanup by data managers.
+
+### 19 — `externalRepository` on File entities must reflect actual file host
+
+The field that captures the hosting repository on file entities (typically `externalRepository`) must contain the system where the file is physically stored — not where the study was discovered. Files deposited in ENA/SRA and discovered via GEO must have `externalRepository=ENA` (or `SRA`), not `GEO`. GEO is a metadata portal; ENA/SRA is the file host. Always derive this from the actual download URL or ENA filereport, not from the discovery accession.
+
+### 20 — Verify PMID belongs to the data paper, not a related article
+
+Before writing any project-level annotations, confirm that the PMID belongs to the paper that **generated and deposited** the data — not to a review, a paper that cites the data, or a companion paper. Signals of a wrong PMID:
+- The paper is a review article with no data availability statement
+- The paper's author list, title, or abstract does not match the study leads and disease description in the project
+- The GEO/SRA study title and the paper title are unrelated
+- The repository was submitted by a different group than the paper's authors
+
+If the PMID is wrong, search PubMed using the repository title, lead author, and institution to find the correct paper. Do not proceed to annotation until the PMID is verified.
+
 ---
 
 ## `alternateDataRepository` — Bioregistry Prefixes
