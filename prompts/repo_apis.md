@@ -57,6 +57,29 @@ def sanitize_entity_name(filename):
 
 Most GEO series have supplementary processed files AND raw reads in SRA. Enumerate both.
 
+### GEO per-sample supplementary file URLs (arrays, IDAT, CEL)
+
+For array studies (Affymetrix, Illumina EPIC, etc.) that store per-sample supplementary files at the GSM level, construct the URL using this exact formula:
+
+```python
+def geo_sample_ftp_url(gsm_accession: str, filename: str) -> str:
+    """
+    Build the HTTPS FTP URL for a per-sample GEO supplementary file.
+    
+    CRITICAL: path_prefix = gsm_digits[:-3] + 'nnn'
+    Example: GSM7719656 → digits='7719656' → digits[:-3]='7719' → path='GSM7719nnn'
+    NOT: digits[:-1] or digits[:-2] — only digits[:-3]
+    """
+    gsm_digits = re.sub(r'^GSM', '', gsm_accession)   # strip 'GSM' prefix
+    path_prefix = gsm_digits[:-3] + 'nnn'              # always last-3 → nnn
+    return (
+        f"https://ftp.ncbi.nlm.nih.gov/geo/samples/"
+        f"GSM{path_prefix}/{gsm_accession}/suppl/{filename}"
+    )
+```
+
+Use this pattern when enumerating individual GSM-level files not covered by `!Series_supplementary_file` in the SOFT. Verify at least one URL with `httpx.head()` before storing all files.
+
 ```python
 import re, httpx
 from Bio import Entrez

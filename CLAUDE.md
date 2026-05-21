@@ -831,6 +831,30 @@ Before writing any project-level annotations, confirm that the PMID belongs to t
 
 If the PMID is wrong, search PubMed using the repository title, lead author, and institution to find the correct paper. Do not proceed to annotation until the PMID is verified.
 
+### 21 — Enum values are case-sensitive; always match the schema exactly
+
+Schema enum values must be used verbatim — including capitalization, punctuation, and spacing. Common mistakes that cause silent validation failures:
+
+- `'Years'` is **not** valid; the `ageUnit` enum contains `'years'` (lowercase)
+- `'Female'` is valid for `sex`; `'female'` is not
+- `'Flash frozen'` is valid for `specimenPreparationMethod`; `'Flash Frozen'` is not
+
+Always call `fetch_schema_properties(schema_uri)` and copy enum values character-for-character. The `validate_against_enum()` function in `prompts/annotation_gap_fill.md` does case-insensitive matching and returns the **exact** enum case — use its return value, not the raw source value.
+
+### 22 — Clinical cohort studies: extract per-patient metadata from supplementary tables before filing for review
+
+When a study provides per-patient clinical data in a supplementary table (sex, age, diagnosis, NF1/NF2 status, tumor type classification), extract it **before** declaring those fields unresolvable. Supplementary tables are a Tier 2 gap-fill source (prompts/annotation_gap_fill.md) and take priority over repository-level metadata for demographic and clinical fields.
+
+Key patterns to apply from supplementary clinical tables:
+
+- **Sex and age per sample**: Map the table's recoded patient number to the GEO/SRA sample ID via the filename or supplementary metadata. Each file should have its own sex and age value — not the cohort average.
+
+- **Relapse vs. second primary**: A "relapse" or "recurrence" of a tumor maps to `Recurrent MPNST` (or equivalent `Recurrent {TumorType}` if that exists in the vocabulary); a "second primary" is a new independent tumor and maps to the primary tumor type, not a recurrent one.
+
+- **NF1 patient cohort neurofibromas**: Benign tumors (neurofibromas, schwannomas) from patients in an NF1 or NF2 disease cohort should have `nf1Genotype = '+/-'` (for NF1) or `nf2Genotype = '+/-'` (for NF2) even if not explicitly stated per sample — germline heterozygosity is the defining feature of NF1/NF2 diagnosis.
+
+- **Tumor subtype distinctions from supplementary**: Supplementary tables frequently disambiguate vague terms. For example, "benign neurofibroma" in the title might be clarified per-sample as "cutaneous neurofibroma" vs. "plexiform neurofibroma" in Supplementary Table 2. Always apply the more specific classification.
+
 ---
 
 ## `alternateDataRepository` — Bioregistry Prefixes
