@@ -45,7 +45,14 @@ def create_external_file_with_size(syn, name: str, parent_id: str, url: str,
     size_bytes sources (in priority order):
       - ENA filereport: fastq_bytes column (semicolon-separated per R1/R2)
       - GEO FTP: httpx.head(url).headers['Content-Length']
-      - TCIA: skip — sizes not available per-series without downloading
+      - TCIA: `FileSize` (bytes) is in the NBIA `getSeries` response — fetch once per collection then look up by SeriesInstanceUID:
+        ```python
+        def get_tcia_sizes(collection_name):
+            r = httpx.get('https://nbia.cancerimagingarchive.net/nbia-api/services/v1/getSeries',
+                          params={'Collection': collection_name}, timeout=30)
+            return {row['SeriesInstanceUID']: row.get('FileSize') for row in r.json()}
+        # Extract UID from URL: re.search(r'SeriesInstanceUID=([^&]+)', url).group(1)
+        ```
     """
     token = os.environ['SYNAPSE_AUTH_TOKEN']
     file_service = 'https://file.synapse.org/api/v1'

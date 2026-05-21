@@ -840,7 +840,7 @@ Use `create_external_file_with_size()` from `prompts/synapse_workflow.md` which 
 Size sources by repository:
 - **ENA/SRA FASTQ**: `fastq_bytes` column from the ENA filereport API (exact, per file)
 - **GEO FTP**: HTTP `HEAD` request to the FTP URL → `Content-Length` header
-- **TCIA**: Per-series sizes are not easily available ahead of time — omit size for TCIA files
+- **TCIA**: `FileSize` (bytes) is in the NBIA `getSeries` response — fetch once per collection then look up by `SeriesInstanceUID` parsed from the download URL
 - **Zenodo/Dryad**: File size in the record's file listing API
 
 Never use `syn.store(File(path=url, synapseStore=False))` alone — this omits contentSize. Always go through the file service handle creation step.
