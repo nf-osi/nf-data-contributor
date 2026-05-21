@@ -831,7 +831,21 @@ Before writing any project-level annotations, confirm that the PMID belongs to t
 
 If the PMID is wrong, search PubMed using the repository title, lead author, and institution to find the correct paper. Do not proceed to annotation until the PMID is verified.
 
-### 21 — Enum values are case-sensitive; always match the schema exactly
+### 21 — Always set `contentSize` on external File entities
+
+When creating File entities with `synapseStore=False` (external URLs), **always set the `contentSize` field** on the ExternalFileHandle. Without it the portal shows "Unknown" for every file size and dataset total sizes are wrong.
+
+Use `create_external_file_with_size()` from `prompts/synapse_workflow.md` which creates the handle via the file service endpoint (`https://file.synapse.org/api/v1/externalFileHandle`) with `contentSize` set, then creates the entity pointing to that handle.
+
+Size sources by repository:
+- **ENA/SRA FASTQ**: `fastq_bytes` column from the ENA filereport API (exact, per file)
+- **GEO FTP**: HTTP `HEAD` request to the FTP URL → `Content-Length` header
+- **TCIA**: Per-series sizes are not easily available ahead of time — omit size for TCIA files
+- **Zenodo/Dryad**: File size in the record's file listing API
+
+Never use `syn.store(File(path=url, synapseStore=False))` alone — this omits contentSize. Always go through the file service handle creation step.
+
+### 22 — Enum values are case-sensitive; always match the schema exactly
 
 Schema enum values must be used verbatim — including capitalization, punctuation, and spacing. Common mistakes that cause silent validation failures:
 

@@ -24,7 +24,10 @@ This file contains the detailed Synapse entity creation steps, annotation vocabu
 
 ### Step 1 — Create the files folder and populate it
 
+**Always set `contentSize` on external file entities.** Without it the portal shows "Unknown" for every file size and the dataset reports incorrect total size. Use the file service endpoint to create the handle with size before storing the entity.
+
 ```python
+import httpx, os
 from synapseclient import Folder, File
 
 files_folder = syn.store(Folder(
@@ -32,13 +35,102 @@ files_folder = syn.store(Folder(
     parentId=raw_folder_id,
 ))
 
+def create_external_file_with_size(syn, name: str, parent_id: str, url: str,
+                                    size_bytes: int | None = None,
+                                    content_type: str = 'application/octet-stream') -> str:
+    """
+    Create a Synapse File entity pointing to an external URL, with contentSize set.
+    Returns the new entity ID.
+
+    size_bytes sources (in priority order):
+      - ENA filereport: fastq_bytes column (semicolon-separated per R1/R2)
+      - GEO FTP: httpx.head(url).headers['Content-Length']
+      - TCIA: skip — sizes not available per-series without downloading
+    """
+    token = os.environ['SYNAPSE_AUTH_TOKEN']
+    file_service = 'https://file.synapse.org/api/v1'
+
+    handle_body = {
+        'concreteType': 'org.sagebionetworks.repo.model.file.ExternalFileHandle',
+        'externalURL': url,
+        'fileName': name,
+        'contentType': content_type,
+    }
+    if size_bytes is not None:
+        handle_body['contentSize'] = size_bytes
+
+    resp = httpx.post(
+        f'{file_service}/externalFileHandle',
+        headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'},
+        json=handle_body,
+        timeout=15,
+    )
+    resp.raise_for_status()
+    handle_id = resp.json()['id']
+
+    # Create the entity and point it at the handle
+    entity_body = {
+        'name': name,
+        'parentId': parent_id,
+        'concreteType': 'org.sagebionetworks.repo.model.FileEntity',
+        'dataFileHandleId': handle_id,
+    }
+    entity_resp = httpx.post(
+        'https://repo-prod.prod.sagebase.org/repo/v1/entity',
+        headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'},
+        json=entity_body,
+        timeout=15,
+    )
+    entity_resp.raise_for_status()
+    return entity_resp.json()['id']
+
+
+# ── Getting sizes from common sources ─────────────────────────────────────────
+
+def get_ena_file_sizes(accession: str) -> dict[str, int]:
+    """Returns {filename: size_bytes} from ENA filereport fastq_bytes column."""
+    r = httpx.get(
+        'https://www.ebi.ac.uk/ena/portal/api/filereport',
+        params={'accession': accession, 'result': 'read_run',
+                'fields': 'run_accession,fastq_ftp,fastq_bytes', 'format': 'json', 'limit': 0},
+        timeout=30
+    )
+    sizes = {}
+    if r.status_code == 200:
+        for row in r.json():
+            ftps = (row.get('fastq_ftp') or '').split(';')
+            bytes_str = (row.get('fastq_bytes') or '').split(';')
+            for ftp, b in zip(ftps, bytes_str):
+                if ftp and b and b.isdigit():
+                    sizes[ftp.split('/')[-1]] = int(b)
+    return sizes
+
+
+def get_geo_ftp_size(url: str) -> int | None:
+    """HEAD request to GEO FTP to get Content-Length."""
+    try:
+        r = httpx.head(url, timeout=10, follow_redirects=True)
+        cl = r.headers.get('Content-Length') or r.headers.get('content-length')
+        return int(cl) if cl else None
+    except Exception:
+        return None
+
+
+# ── Usage ─────────────────────────────────────────────────────────────────────
+
+# For ENA: fetch all sizes once, then create files
+ena_sizes = get_ena_file_sizes(accession_id)  # {filename: bytes}
+
 for filename, download_url in file_list:
-    syn.store(File(
-        name=filename,
-        parentId=files_folder.id,
-        synapseStore=False,
-        path=download_url,   # use path= not externalURL= in synapseclient v4.x
-    ))
+    size = ena_sizes.get(filename)  # None if not found
+    create_external_file_with_size(syn, filename, files_folder.id, download_url, size)
+
+# For GEO FTP files: HEAD each URL (add a small delay between requests)
+import time
+for filename, download_url in file_list:
+    size = get_geo_ftp_size(download_url)
+    create_external_file_with_size(syn, filename, files_folder.id, download_url, size)
+    time.sleep(0.2)
 ```
 
 ### Step 2 — Create the Dataset entity and link files
