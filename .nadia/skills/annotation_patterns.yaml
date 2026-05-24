@@ -270,9 +270,15 @@ patterns:
       supplementary tables". A curation comment that says "sex not in GEO metadata —
       needs human review" without having attempted the supplementary tables is an
       incomplete gap-fill, not a genuine gap.
+      Issue #290 reinforced: NADIA placed a Sample_list.xlsx into Source Metadata
+      during file enumeration but did NOT parse it before annotating. The data
+      manager had to manually correct 71 files (tumorType and diagnosis) using the
+      same xlsx. Rule: any depositor-provided sample manifest file stored in
+      Source Metadata MUST be parsed at gap-fill time, before declaring per-sample
+      fields unresolvable. See "depositor-manifest-must-be-parsed-not-just-stored".
     source: fix
-    issues: [123]
-    added: "2026-04-16"
+    issues: [123, 290]
+    updated: "2026-05-24"
 
   - pattern: "Wiki must include Auto-curated attribution and disclaimer"
     rule: >
@@ -541,3 +547,166 @@ patterns:
     source: fix
     issues: [23]
     added: "2026-05-03"
+
+  - pattern: "depositor-manifest-must-be-parsed-not-just-stored"
+    rule: >
+      A depositor-provided sample manifest file (Sample_list.xlsx, sample_metadata.csv,
+      clinical_data.xlsx, samplesheet.tsv, etc.) is GROUND TRUTH for per-sample
+      diagnosis, tumorType, sex, age, genotype, and tissue source. Copying the
+      manifest into the Source Metadata/ folder is NOT enough — the manifest MUST
+      be parsed and its per-sample values applied to the corresponding File entities
+      before the project is logged as `synapse_created`.
+      Audit Phase 1 must add this blocking check: if Source Metadata/ contains any
+      file whose name matches a manifest pattern (sample, metadata, manifest,
+      clinical, samplesheet, sample_list, sample_info, with .xlsx/.csv/.tsv/.xls
+      extension) AND files in the dataset have placeholder values like 'Not
+      Applicable', 'Unknown', or repeated identical values across multi-group
+      studies for biological fields → flag as `unparsed_depositor_manifest`
+      BLOCKING error. Phase 2 must download, parse, and apply the manifest's
+      per-sample values before the block can clear.
+      Issue #290 root cause: NADIA stored Sample_list.xlsx in Source Metadata
+      during initial file enumeration but skipped parsing it during gap-fill,
+      leaving all 71 specimens with `diagnosis='Not Applicable'` and wrong
+      tumorTypes (Neurofibroma instead of Hybrid PNST, etc.). The data manager
+      had to manually re-annotate.
+    source: fix
+    issues: [290]
+    added: "2026-05-24"
+
+  - pattern: "dbgap-link-to-existing-project-via-sra-runs"
+    rule: >
+      When a data manager requests that dbGaP study indexes be linked to an
+      existing Synapse project (typically pattern: "link phs* indexes to syn*
+      following the same pattern as <reference EGA project>"), do NOT create a
+      new project. Instead, add per-run file entities under the existing
+      project's Raw Data folder using the same pattern as the EGA reference
+      project (syn32128792). Implementation:
+        1. Enumerate SRA runs from the linked SRA study accession (e.g., SRP*)
+           via ENA filereport API — request all available columns for accessible
+           runs; use NCBI Entrez efetch on the SRA database with the phs*
+           accession as search term for dbGaP-restricted runs not in ENA.
+        2. For each SRR, create a File entity with ExternalFileHandle pointing
+           to the dbGaP study page:
+             https://www.ncbi.nlm.nih.gov/projects/gap/cgi-bin/study.cgi?study_id={phs_id}
+           Name each file after the SRR accession (e.g., SRR32270189).
+        3. Fetch dbGaP phenotype indexes (pht* files) from the dbGaP FTP for
+           per-subject DIAGNOSIS, SEX, AGE, NF1/NF2_STATUS, and per-sample
+           HISTOLOGICAL_TYPE, BODY_SITE, IS_TUMOR, ANALYTE_TYPE. Map sample
+           accessions to subjects, then apply per-file values.
+        4. Set per-file: assay (from library_strategy), individualID (from
+           sample_alias), specimenID (from sample_title), sex, tumorType,
+           diagnosis, organ/tissue (from BODY_SITE), accessType='Controlled
+           Access'.
+        5. Create a Dataset entity as a direct child of the project named like
+           "dbGaP Raw Data (requires approval on dbGaP)". Set Dataset
+           annotations: contentType=dataset, externalAccessionID=phs* (plus the
+           linked SRP* and PRJNA* accessions as a list), externalRepository=dbGaP
+           (plus SRA, BioProject), accessType='Controlled Access', and add a
+           `conditionsOfAccess` annotation:
+             "Data must be requested and accessed through dbGaP, study {phs_id}."
+        6. Bind appropriate schema(s) (e.g., genomicsassaytemplate for WXS,
+           rnaseqtemplate for RNA-seq) to the files folder.
+        7. Update the project wiki with a dbGaP access notice (parallel to the
+           EGA notice in syn32128792):
+             "**PLEASE NOTE:** This project links to data stored in dbGaP,
+             annotated with the NF-OSI metadata dictionary to make this dataset
+             visible in the NF Data Portal. The data itself _is not available_
+             on Synapse or the NF Data Portal. You must request permission and
+             access the data on [dbGaP]({study_url})."
+        8. Mint stable v1 snapshot on the dataset.
+      Before starting: verify the NADIA service account has admin permissions
+      on the target project — if it doesn't, the run will fail and the request
+      must be re-routed (Issue #299 root cause).
+    source: fix
+    issues: [299]
+    added: "2026-05-24"
+
+  - pattern: "isprimarycell-no-for-cell-lines"
+    rule: >
+      When the schema defines an `isPrimaryCell` field and the sample is an
+      immortalized cell line (specimenType='cell line' OR isCellLine='Yes'),
+      set `isPrimaryCell='No'`. Immortalized cell lines are by definition NOT
+      primary cells — they have been transformed or stably propagated beyond
+      primary culture. This applies to ST8814, MCF-7, HEK293, all NF1-null
+      Schwann cell lines, MPNST cell lines, etc.
+      Conversely, if the sample is a primary culture (not yet immortalized)
+      directly isolated from tissue and used within a few passages, set
+      `isPrimaryCell='Yes'`.
+      Audit Phase 1 must check: any File entity with specimenType='cell line'
+      or isCellLine='Yes' and no `isPrimaryCell` annotation → auto-fix by
+      setting `isPrimaryCell='No'`. This was a recurring post-approval fix
+      (Issue #156) and is fully derivable without reasoning.
+    source: fix+confirmed
+    issues: [156]
+    added: "2026-05-24"
+
+  - pattern: "nf-cohort-default-disease-for-tumors-without-explicit-statement"
+    rule: >
+      When the study is an NF-focused cohort (paper title/abstract describes
+      "NF1 patients", "NF2 patients", "schwannomatosis patients", "NF cohort",
+      or similar), specimens that are NF-associated tumor types should be
+      annotated with the corresponding disease as `diagnosis` even when the
+      per-sample germline status is not explicitly stated in the manifest:
+        - MPNST in NF1 cohort → diagnosis='Neurofibromatosis type 1'
+        - Plexiform neurofibroma in NF1 cohort → diagnosis='Neurofibromatosis type 1'
+        - Hybrid PNST in NF1 cohort → diagnosis='Neurofibromatosis type 1'
+          (HPNSTs are predominantly NF1-associated)
+        - Schwannoma in NF2 cohort → diagnosis='Neurofibromatosis type 2'
+          (or 'NF2-related schwannomatosis')
+        - Schwannoma in schwannomatosis cohort → diagnosis='schwannomatosis'
+      EXCEPTIONS that must remain `Not Applicable` or get a non-NF disease:
+        - Synovial sarcoma or other sporadic sarcomas mixed in the cohort
+          (per Issue #290, R1_3 was Synovial Sarcoma and correctly remained NA)
+        - Healthy donor controls
+        - Cancer types not associated with the NF syndrome (e.g., pancreatic
+          ductal adenocarcinoma in an NF1 cohort study — these would be NA)
+      Always flag this default-assignment decision in the GitHub curation
+      comment so the data manager can confirm if patient-level germline status
+      is available in records they have access to.
+      This extends Standard 22 (which covered benign tumors) to malignant
+      tumors in NF cohort studies.
+    source: fix
+    issues: [290]
+    added: "2026-05-24"
+
+  - pattern: "spatial-transcriptomics-one-dataset-confirmed"
+    rule: >
+      Standard 15 (one Dataset entity for spatial transcriptomics bundles)
+      confirmed by Issue #290: NADIA initially created two Dataset entities
+      (imaging + sequencing) for the same Zenodo record. The data manager
+      merged them into a single Dataset (syn74276744 with 82 files), kept the
+      imaging folder and sequencing folder with their separate schemas bound,
+      and minted a single stable v6 snapshot.
+      Reinforcement: when a single Zenodo/Figshare/Dryad record contains BOTH
+      imaging files (e.g., .tif, .czi, .ome.tif) AND sequencing files (e.g.,
+      .fastq, .h5, count matrices), they are one logical spatial transcriptomics
+      dataset. Create:
+        - ONE Dataset entity as direct child of the project
+        - TWO files folders inside Raw Data (one for imaging, one for sequencing)
+        - Different schema bound to each folder (imaging template + sequencing template)
+        - Dataset items = union of all file IDs from both folders
+        - Dataset columnIds = union of annotation columns from both file sets
+      Audit Phase 1 must check: if a single repository accession produced
+      multiple Dataset entities, and the file folders contain mixed imaging
+      and sequencing files, flag as a spatial-transcriptomics-split error.
+    source: fix+confirmed
+    issues: [290]
+    added: "2026-05-24"
+
+  - pattern: "fileformat-zip-fallback-to-content-type"
+    rule: >
+      When the deposited file is a zip archive containing data files in a known
+      format (DICOM, FASTQ, TIFF, etc.) and the schema's fileFormat enum does
+      NOT include 'zip', set fileFormat to the INNER content type (e.g., 'DICOM'
+      for a zip of DICOM files) and document the zip wrapper in the curation
+      comment with a vocabulary-gap flag for 'zip'.
+      Detection signals:
+        - Filename ends in .zip
+        - Repository description references the archived content type
+        - For TCIA collections: zip archives wrap DICOM series
+      Issue #80 confirmed this approach (fileFormat=DICOM for crossmoda_training.zip).
+      Flag pattern: "fileFormat=zip vocabulary gap — files are zip archives
+      containing {content_type}. Annotated as {content_type} per inner content."
+    source: confirmed
+    issues: [80]
+    added: "2026-05-24"

@@ -120,6 +120,8 @@ Many data deposits include a structured metadata file alongside the data files �
 - GEO: supplementary files at `GSE*_RAW.tar` are typically processed data, but `GSE*_metadata.xlsx` or `GSE*_sample_info.csv` are sample manifest candidates — always scan `suppFile` from the series summary
 - TCIA: collection pages often link to a clinical spreadsheet (e.g., `clinical_data.xlsx`)
 
+> **Storing the manifest is not parsing it.** If you copy a sample manifest into the project's Source Metadata/ folder during file enumeration but do not parse and apply its per-sample values, every File entity will retain placeholder values like `Not Applicable` or `Unknown` for biological fields — and the data manager will have to re-do the work manually using the same file you stored (Issue #290). The audit (Step 7a) treats this as a blocking error: any Source Metadata/ file matching a manifest pattern alongside files with placeholder biological annotations is flagged as `unparsed_depositor_manifest` and must be resolved in Phase 2.
+
 ```python
 def scan_for_depositor_metadata(deposit_files: list[dict]) -> list[dict]:
     """
