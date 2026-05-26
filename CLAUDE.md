@@ -929,22 +929,26 @@ for dataset in pub_group['datasets']:
 
 ## Team Permissions
 
-After creating each new Synapse project, grant curator permissions to the data manager team. Read `team_id` from `config/settings.yaml` → `synapse.team_id`:
+After creating each new Synapse project, grant curator permissions to **all configured teams**. Read `team_id` and `additional_team_ids` from `config/settings.yaml` → `synapse`:
 
 ```python
 import yaml
 with open('config/settings.yaml') as f:
     cfg = yaml.safe_load(f)
 
-team_id = cfg['synapse']['team_id']
-syn.setPermissions(
-    project_id,
-    principalId=team_id,
-    accessType=['READ', 'DOWNLOAD', 'CREATE', 'UPDATE', 'DELETE',
+ADMIN_ACCESS = ['READ', 'DOWNLOAD', 'CREATE', 'UPDATE', 'DELETE',
                 'CHANGE_PERMISSIONS', 'CHANGE_SETTINGS', 'MODERATE',
-                'UPDATE_SUBMISSION', 'READ_PRIVATE_SUBMISSION'],
-    warn_if_inherits=False
-)
+                'UPDATE_SUBMISSION', 'READ_PRIVATE_SUBMISSION']
+
+# Grant to primary team and any additional teams
+all_team_ids = [cfg['synapse']['team_id']] + cfg['synapse'].get('additional_team_ids', [])
+for team_id in all_team_ids:
+    syn.setPermissions(
+        project_id,
+        principalId=str(team_id),
+        accessType=ADMIN_ACCESS,
+        warn_if_inherits=False
+    )
 ```
 
 Do this immediately after storing the project entity.

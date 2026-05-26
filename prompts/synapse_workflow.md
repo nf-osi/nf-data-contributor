@@ -1681,23 +1681,24 @@ for proj in created:
     import yaml as _yaml
     with open('config/settings.yaml') as _f:
         _cfg = _yaml.safe_load(_f)
-    _team_id = int(_cfg['synapse']['team_id'])
-    _team_id_str = str(_team_id)
+    _all_team_ids = [str(_cfg['synapse']['team_id'])] + \
+                    [str(t) for t in _cfg['synapse'].get('additional_team_ids', [])]
+    _ADMIN = ['READ','DOWNLOAD','CREATE','UPDATE','DELETE',
+              'CHANGE_PERMISSIONS','CHANGE_SETTINGS','MODERATE',
+              'UPDATE_SUBMISSION','READ_PRIVATE_SUBMISSION']
     try:
         acl = syn.restGET(f'/entity/{project_id}/acl')
-        has_team = any(ra['principalId'] == _team_id for ra in acl.get('resourceAccess', []))
-        if not has_team:
-            syn.setPermissions(
-                project_id, principalId=_team_id_str,
-                accessType=['READ','DOWNLOAD','CREATE','UPDATE','DELETE',
-                            'CHANGE_PERMISSIONS','CHANGE_SETTINGS','MODERATE',
-                            'UPDATE_SUBMISSION','READ_PRIVATE_SUBMISSION'],
-                warn_if_inherits=False
-            )
-            result['fixes_applied'].append(f'Data manager team ({_team_id_str}) permissions granted')
-            print(f"  Permissions: FIXED — data manager team granted access")
-        else:
-            print(f"  Permissions: OK")
+        current_principals = {str(ra['principalId']) for ra in acl.get('resourceAccess', [])}
+        for _team_id_str in _all_team_ids:
+            if _team_id_str not in current_principals:
+                syn.setPermissions(
+                    project_id, principalId=_team_id_str,
+                    accessType=_ADMIN, warn_if_inherits=False
+                )
+                result['fixes_applied'].append(f'Team {_team_id_str} permissions granted')
+                print(f"  Permissions: FIXED — team {_team_id_str} granted access")
+        if all(t in current_principals for t in _all_team_ids):
+            print(f"  Permissions: OK ({len(_all_team_ids)} teams)")
     except Exception as e:
         result['warnings'].append(f'Permissions check failed: {e}')
 

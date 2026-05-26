@@ -54,6 +54,8 @@ synapse:
   # Principal ID of the data manager team that receives curator permissions on new projects
   # Find this in Synapse: Teams → your data manager team → team ID in the URL
   team_id: "3378999"
+  additional_team_ids:
+    - "3591454"
   schema:
     # Prefix prepended to template names to form a Synapse JSON Schema URI
     # e.g. "org.synapse.nf-" + "scrnaseqtemplate" → "org.synapse.nf-scrnaseqtemplate"
