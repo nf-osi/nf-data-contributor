@@ -869,6 +869,46 @@ Key patterns to apply from supplementary clinical tables:
 
 - **Tumor subtype distinctions from supplementary**: Supplementary tables frequently disambiguate vague terms. For example, "benign neurofibroma" in the title might be clarified per-sample as "cutaneous neurofibroma" vs. "plexiform neurofibroma" in Supplementary Table 2. Always apply the more specific classification.
 
+- **Malignant tumors in NF cohort studies inherit the cohort diagnosis** (extension to Standard 22 above): When the study explicitly recruits NF1, NF2, or schwannomatosis patients (paper title/abstract uses phrases like "NF1 patients", "NF2 patient biopsies", "NF cohort"), set `diagnosis` to the cohort's NF type for NF-associated tumors even when the per-sample germline status is not explicitly stated. This applies to MPNST, plexiform neurofibroma, Hybrid PNST (which is predominantly NF1-associated), and schwannoma (in NF2/schwannomatosis cohorts). EXCEPTION: sporadic sarcomas mixed into the cohort (e.g., synovial sarcoma alongside NF1 MPNSTs) and healthy controls keep `diagnosis='Not Applicable'`. Always flag the default-assignment decision in the GitHub curation comment.
+
+### 23 — Depositor sample manifest files must be parsed, not just stored
+
+When the file enumeration step (Step 6) copies a depositor-provided sample manifest (`Sample_list.xlsx`, `sample_metadata.csv`, `clinical_data.xlsx`, `samplesheet.tsv`, etc.) into the project's Source Metadata/ folder, that file MUST also be parsed during Phase 2 gap-fill and its per-sample values applied to the corresponding File entities. Storing the manifest is necessary for provenance but does not satisfy the per-sample annotation requirement.
+
+Procedure:
+1. After file enumeration, list everything that landed in Source Metadata/ and tag any manifest-pattern file.
+2. During Phase 2 gap-fill, download the manifest, parse it with `try_download_and_parse_table()`, and call `find_sample_metadata_table()` to identify the row→file mapping.
+3. Apply per-sample values for diagnosis, tumorType, sex, age, genotype, tissue, and any other biological field present in the manifest. Manifest values override any earlier inferred or repository-derived values.
+4. Mention the manifest as a Tier 1 source in the GitHub curation comment.
+
+The audit (Step 7a) flags this as `unparsed_depositor_manifest` when a manifest file is present in Source Metadata/ alongside files that retain placeholder biological values. Phase 2 must clear the block before the project can be logged as `synapse_created`.
+
+### 24 — `isPrimaryCell=No` for immortalized cell lines
+
+When the bound schema defines an `isPrimaryCell` field and the sample is an immortalized cell line (any File entity with `specimenType='cell line'` or `isCellLine='Yes'`), set `isPrimaryCell='No'`. Immortalized cell lines are by definition not primary cells — they have been transformed or stably propagated past the primary culture stage. This applies to all established cell lines: ST8814, MCF-7, HEK293, NF1-null Schwann cell lines, MPNST cell lines, etc.
+
+Set `isPrimaryCell='Yes'` only when the sample is a primary culture directly isolated from tissue and used within a small number of passages without immortalization.
+
+The audit (Step 7a) auto-fixes this: any File entity with `specimenType='cell line'` or `isCellLine='Yes'` and no `isPrimaryCell` annotation gets `isPrimaryCell='No'`. This is fully derivable without reasoning and was a recurring post-approval data manager fix.
+
+### 25 — dbGaP study linking: extend an existing project, do not create a new one
+
+When a data manager requests that dbGaP study indexes be linked to an existing Synapse project (typical request: "link `phs*` indexes to `syn*`, following the same pattern as the EGA-linked reference project syn32128792"), do NOT create a new Synapse project. Instead, add per-run file entities to the existing project's Raw Data folder following the EGA reference pattern.
+
+Procedure:
+1. Verify the NADIA service account has admin permissions on the target project. If not, abort and surface the missing-permissions error in the comment — the data manager needs to grant access first (Issue #299 root cause).
+2. Enumerate SRA runs via the SRA study accession (e.g., `SRP*`) using the ENA filereport API for accessible runs and `Entrez.efetch(db='sra', term='phs*')` for dbGaP-restricted runs not in ENA.
+3. For each SRR, create a File entity with an ExternalFileHandle pointing to the dbGaP study page:
+   `https://www.ncbi.nlm.nih.gov/projects/gap/cgi-bin/study.cgi?study_id={phs_id}`
+   Name the file after the SRR accession.
+4. Fetch dbGaP phenotype indexes (`pht*` files) from the dbGaP FTP for per-subject DIAGNOSIS, SEX, AGE, NF1/NF2_STATUS, and per-sample HISTOLOGICAL_TYPE, BODY_SITE, IS_TUMOR, ANALYTE_TYPE. Map sample accessions to subjects and apply per-file values.
+5. Set per-file: `assay` (from `library_strategy`), `individualID` (from `sample_alias`), `specimenID` (from `sample_title`), `sex`, `tumorType`, `diagnosis`, `organ`/`tissue`, `accessType='Controlled Access'`.
+6. Create a Dataset entity as a direct child of the project named like "dbGaP Raw Data (requires approval on dbGaP)". Set Dataset annotations including `accessType='Controlled Access'` and a `conditionsOfAccess` annotation: `"Data must be requested and accessed through dbGaP, study {phs_id}."`
+7. Bind the appropriate schema(s) to the files folder (e.g., `genomicsassaytemplate` for WXS, `rnaseqtemplate` for RNA-seq).
+8. Update the project wiki with a dbGaP access notice that parallels the EGA notice in syn32128792:
+   `"**PLEASE NOTE:** This project links to data stored in dbGaP, annotated with the NF-OSI metadata dictionary to make this dataset visible in the NF Data Portal. The data itself _is not available_ on Synapse or the NF Data Portal. You must request permission and access the data on [dbGaP]({study_url})."`
+9. Mint a stable v1 snapshot on the Dataset entity (Phase 3 timing).
+
 ---
 
 ## `alternateDataRepository` — Bioregistry Prefixes
