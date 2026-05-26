@@ -653,6 +653,8 @@ For identifier fields (specimen ID, sample ID, individual ID, biobank ID, or sim
 
 **Signal that this rule was violated:** all files in the project have the same value for a field that represents a biological property of a sample (genotype, condition, sex, etc.) despite the study having multiple experimental groups.
 
+**Exception — behavioral data tables and aggregate output files:** Some deposits consist of per-figure or per-experiment data tables (e.g., CSV/XLSX files where each row is a measurement event or fly, not a sequencing sample). For these files, `individualID` and `specimenID` do not map to a meaningful biological unit at the file level — each file contains data from many individuals simultaneously. Do not force a placeholder value (e.g., copying the figure name) into `individualID`. Instead: (1) leave `individualID` unset, (2) note in the GitHub curation comment that the field does not apply to this data structure and that the schema requires it, and (3) flag this as a schema design issue for the data manager to resolve (e.g., by requesting the field be made optional for non-genomic behavioral data). This is preferable to polluting the field with meaningless values that will mislead downstream users.
+
 ### 6 — Assay subtype fields: verify from source metadata, not title
 
 Publication titles often describe the biology, not the technology. When a schema has an assay-type field with fine-grained values (e.g., distinguishing single-cell from bulk RNA-seq, or ChIP-seq target type), the source of truth is the repository's library metadata — not the paper title. Check ENA `library_source`/`library_strategy`, GEO sample characteristics, or repository experiment descriptions before setting these fields.
@@ -670,9 +672,11 @@ If the data belongs to a different paper, discard it and process it separately u
 
 A single study often deposits data in multiple repositories (GEO + SRA + BioProject, or PRIDE + MassIVE). Always populate `alternateDataRepository` with all related accessions, not just the one you discovered it through. For GEO series, check `!Series_relation` for linked SRA/BioProject accessions. For ENA studies, check the study record for linked accessions.
 
-### 9 — Controlled vocabulary gaps: flag, don't silently drop
+### 9 — Controlled vocabulary gaps: flag, don't silently drop; file a PR when a required field is blocked
 
 When a concept from the study is not in the schema enum (e.g., a tumor type or species not yet in the controlled vocabulary), use the closest available enum value AND explicitly document the gap in the GitHub curation comment. This ensures human reviewers know what was approximated and can request a vocabulary update if warranted. Do not silently omit required fields — a best-effort value with a flag is better than a missing field.
+
+**When a vocabulary gap blocks a required field on one or more projects, file a PR to `nf-osi/nf-metadata-dictionary` rather than leaving the issue open indefinitely.** The PR should add the missing term to the appropriate module YAML (typically `modules/Assay/Assay.yaml`), include a description and an ontology `meaning` URI (OBI, NBO, MMO, NCIT, or similar), and insert the term in alphabetical order within the enum. Reference the study that triggered the gap in the PR description. Set the annotation on the affected files to the new term value immediately — the annotation will be stored even before the schema PR merges, and validation will pass once the schema is updated.
 
 ### 10 — Post-curation GitHub comment is required
 
@@ -734,7 +738,7 @@ Samples that must **NOT** receive a tumor-type annotation:
 - iPSCs or pluripotent cell lines, unless explicitly described as disease-affected and phenotypically abnormal
 - Benign tumors or pre-malignant lesions when the study question is malignant transformation risk — a benign neurofibroma is **not** an MPNST
 
-If a sample is normal or control: leave `tumorType` unset (or use the closest schema enum value for non-tumor status if one exists). Document the reasoning in the GitHub curation comment.
+If a sample is normal or control: set `tumorType = Not Applicable` — this value is in the enum and is the correct choice for non-tumor samples including animal models used in behavioral or functional studies. Do not leave `tumorType` unset; the schema requires it and an unset required field fails validation. Document the reasoning in the GitHub curation comment.
 
 ### 13 — File enumeration completeness: a landing-page link is not a complete dataset
 

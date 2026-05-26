@@ -1055,6 +1055,8 @@ The `data_access_section` parameter must be built by calling `build_data_access_
 - Sentence 2: what data was generated (assay, model system, experimental design)
 - Sentence 3: what was found or what the dataset enables
 
+**The Summary and Background sections must be distinct.** Background contains the full verbatim abstract from PubMed. Summary is a concise 3–5 sentence plain-language synthesis written through your own reasoning — not a truncated or paraphrased copy of the abstract. If a reader could replace the Summary with the Background and lose nothing, the Summary was not written correctly. A correct Summary: uses different sentence structures from the abstract, synthesizes rather than quotes, and could stand alone as a one-paragraph description for a non-expert audience. After generating the wiki, verify that `plain_summary[:100]` differs from `abstract[:100]`; if they match, rewrite the summary.
+
 **Wiki title**: use the full publication title (not "Auto-Discovered..." or similar). Do not add "Auto-Discovered" to the title or anywhere in the wiki header.
 
 ---
